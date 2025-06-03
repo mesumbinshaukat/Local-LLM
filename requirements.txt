@@ -1,0 +1,17 @@
+transformers
+torch
+duckduckgo-search
+click
+sentencepiece
+datasets
+requests
+rich
+llama-cpp-python
+chromadb
+pypdf
+fastapi
+uvicorn
+pyqt6
+pyqt6-tools
+pyqt6-qt6
+markdown2
