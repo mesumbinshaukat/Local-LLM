@@ -134,29 +134,29 @@ def load_model():
 
 @app.post("/chat")
 async def chat_endpoint(req: ChatRequest):
+    user_id = getattr(req, 'user_id', 'default')
     def run_llm():
         try:
             server_status["processing"] = True
             server_status["last_request_time"] = time.time()
-            # Phase 5: Personalization
             preferences = getattr(req, 'preferences', None)
-            sys_prompt = CYBERSEC_PROMPT if req.cyber_mode else SYSTEM_PROMPT
-            if preferences:
-                if preferences.get("answer_style") == "concise":
-                    sys_prompt += " Always be concise."
-                elif preferences.get("answer_style") == "detailed":
-                    sys_prompt += " Always be detailed and thorough."
-                if preferences.get("tech_depth") == "basic":
-                    sys_prompt += " Use basic, beginner-friendly explanations."
-                elif preferences.get("tech_depth") == "advanced":
-                    sys_prompt += " Use advanced, technical explanations."
-                if preferences.get("language") and preferences["language"] != "English":
-                    sys_prompt += f" Answer in {preferences['language']}."
+            sys_prompt = build_system_prompt(preferences, user_id)
             messages = truncate_history(req.messages)
             if not messages or messages[0].get("role") != "system":
                 messages = ([{"role": "system", "content": sys_prompt}] + messages)
             else:
                 messages[0]["content"] = sys_prompt
+            for m in messages:
+                if m["role"] == "user" and "my name is" in m["content"].lower():
+                    name = m["content"].split("my name is",1)[1].strip().split()[0].capitalize()
+                    db = get_mongo()
+                    db.user_info.update_one({"key": "name"}, {"$set": {"value": name}}, upsert=True)
+            db = get_mongo()
+            for m in messages:
+                if isinstance(m, dict) and 'role' in m and 'content' in m:
+                    db.chat_history.insert_one({"user_id": user_id, "message": m, "timestamp": time.time()})
+                else:
+                    db.chat_history.insert_one({"user_id": user_id, "message": {"role": "user", "content": str(m)}, "timestamp": time.time()})
             if req.use_rag and req.query:
                 context = retrieve_context(req.query)
                 if context:
@@ -178,28 +178,23 @@ async def chat_endpoint(req: ChatRequest):
                 stop=["</s>"]
             )
             response = output["choices"][0]["message"]["content"].strip()
-            # Phase 1: Detect 'I don't know' and fallback
             web_results = []
             rag_results = []
             if is_dont_know(response):
-                # Web search fallback
                 try:
                     with DDGS() as ddgs:
-                        web_results = list(ddgs.text(req.query, max_results=3))
+                        web_results = [r for r in ddgs.text(req.query, max_results=3) if r.get("body") and not any(x in r.get("body","") for x in ["password", "top_1000_common_passwords"])]
                 except Exception as e:
                     web_results = [{"title": "Web search failed", "body": str(e), "href": ""}]
-                # RAG fallback (if not already used)
                 if not req.use_rag:
                     try:
                         rag_chunks = retrieve_context(req.query)
-                        rag_results = rag_chunks
+                        rag_results = [r for r in rag_chunks if r.get("text") and not any(x in r.get("text","") for x in ["password", "top_1000_common_passwords"])]
                     except Exception as e:
                         rag_results = [{"text": f"RAG failed: {e}", "source": "", "chunk": 0}]
-            # Phase 3: Extract suggestions
             suggestions = extract_suggestions(response)
             server_status["processing"] = False
             server_status["last_error"] = None
-            # Backward compatible: 'response' for old clients, all fields for new
             return {
                 "response": response,
                 "llm_answer": response,
@@ -208,11 +203,10 @@ async def chat_endpoint(req: ChatRequest):
                 "suggestions": suggestions
             }
         except Exception as e:
-            logging.error("LLM error: %s", str(e), exc_info=True)
+            logging.error("LLM error: %s\n%s", str(e), traceback.format_exc())
             server_status["processing"] = False
             server_status["last_error"] = str(e)
-            return JSONResponse(status_code=500, content={"error": str(e)})
-    # Run LLM in a thread for non-blocking
+            return JSONResponse(status_code=500, content={"error": str(e), "traceback": traceback.format_exc()})
     result = {}
     thread = threading.Thread(target=lambda: result.update(run_llm()))
     thread.start()
@@ -221,43 +215,27 @@ async def chat_endpoint(req: ChatRequest):
 
 @app.post("/chat/stream")
 async def chat_stream_endpoint(req: ChatRequest):
+    user_id = getattr(req, 'user_id', 'default')
     def chat_stream_generator():
         try:
             server_status["processing"] = True
             server_status["last_request_time"] = time.time()
             preferences = getattr(req, 'preferences', None)
-            sys_prompt = CYBERSEC_PROMPT if req.cyber_mode else SYSTEM_PROMPT
-            if preferences:
-                if preferences.get("answer_style") == "concise":
-                    sys_prompt += " Always be concise."
-                elif preferences.get("answer_style") == "detailed":
-                    sys_prompt += " Always be detailed and thorough."
-                if preferences.get("tech_depth") == "basic":
-                    sys_prompt += " Use basic, beginner-friendly explanations."
-                elif preferences.get("tech_depth") == "advanced":
-                    sys_prompt += " Use advanced, technical explanations."
-                if preferences.get("language") and preferences["language"] != "English":
-                    sys_prompt += f" Answer in {preferences['language']}."
+            sys_prompt = build_system_prompt(preferences, user_id)
             messages = truncate_history(req.messages)
             if not messages or messages[0].get("role") != "system":
                 messages = ([{"role": "system", "content": sys_prompt}] + messages)
             else:
                 messages[0]["content"] = sys_prompt
-            if req.use_rag and req.query:
-                context = retrieve_context(req.query)
-                if context:
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "Use the following context to answer the user's question. "
-                            "If you are unsure, ask the user for clarification. "
-                            "If the user doesn't know something, suggest next steps.\n\n"
-                            f"Context:\n---\n{context}\n---\n\n"
-                            f"User Question: {req.query}\nAnswer:"
-                        )
-                    })
+            for m in messages:
+                if m["role"] == "user" and "my name is" in m["content"].lower():
+                    name = m["content"].split("my name is",1)[1].strip().split()[0].capitalize()
+                    db = get_mongo()
+                    db.user_info.update_one({"key": "name"}, {"$set": {"value": name}}, upsert=True)
+                if isinstance(m, dict) and 'role' in m and 'content' in m:
+                    db.chat_history.insert_one({"user_id": user_id, "message": m, "timestamp": time.time()})
                 else:
-                    messages.append({"role": "user", "content": req.query})
+                    db.chat_history.insert_one({"user_id": user_id, "message": {"role": "user", "content": str(m)}, "timestamp": time.time()})
             partial = ""
             dont_know_triggered = False
             for chunk in llm.create_chat_completion(
@@ -273,32 +251,28 @@ async def chat_stream_endpoint(req: ChatRequest):
                     yield content
                     if not dont_know_triggered and is_dont_know(partial):
                         dont_know_triggered = True
-            # At the end, if 'I don't know' was detected, send fallback
             suggestions = extract_suggestions(partial)
             if dont_know_triggered or suggestions:
-                # Web search fallback
                 try:
                     with DDGS() as ddgs:
-                        web_results = list(ddgs.text(req.query, max_results=3))
+                        web_results = [r for r in ddgs.text(req.query, max_results=3) if r.get("body") and not any(x in r.get("body","") for x in ["password", "top_1000_common_passwords"])]
                 except Exception as e:
                     web_results = [{"title": "Web search failed", "body": str(e), "href": ""}]
-                # RAG fallback (if not already used)
                 rag_results = []
                 if not req.use_rag:
                     try:
                         rag_chunks = retrieve_context(req.query)
-                        rag_results = rag_chunks
+                        rag_results = [r for r in rag_chunks if r.get("text") and not any(x in r.get("text","") for x in ["password", "top_1000_common_passwords"])]
                     except Exception as e:
                         rag_results = [{"text": f"RAG failed: {e}", "source": "", "chunk": 0}]
-                # Send as a JSON block at the end
                 yield "\n[FALLBACK]" + json.dumps({"web_results": web_results, "rag_results": rag_results, "suggestions": suggestions})
             server_status["processing"] = False
             server_status["last_error"] = None
         except Exception as e:
-            logging.error("LLM stream error: %s", str(e), exc_info=True)
+            logging.error("LLM stream error: %s\n%s", str(e), traceback.format_exc())
             server_status["processing"] = False
             server_status["last_error"] = str(e)
-            yield f"\n[ERROR]: {str(e)}"
+            yield f"\n[ERROR]: {str(e)}\n{traceback.format_exc()}"
     return StreamingResponse(chat_stream_generator(), media_type="text/plain")
 
 def retrieve_context(query, top_k=3):
@@ -1040,6 +1014,95 @@ def watch_for_changes():
 # Start the file watcher in a separate thread
 watcher_thread = threading.Thread(target=watch_for_changes, daemon=True)
 watcher_thread.start()
+
+# --- Add user info endpoints ---
+@app.post("/memory/user_info")
+async def save_user_info(request: dict):
+    key = request.get("key")
+    value = request.get("value")
+    db = get_mongo()
+    db.user_info.update_one({"key": key}, {"$set": {"value": value}}, upsert=True)
+    return {"status": "ok"}
+
+@app.get("/memory/user_info/{key}")
+async def load_user_info(key: str):
+    db = get_mongo()
+    doc = db.user_info.find_one({"key": key})
+    return {"value": doc["value"] if doc else None}
+
+# --- Helper to get user info for personalization ---
+def get_user_name():
+    db = get_mongo()
+    doc = db.user_info.find_one({"key": "name"})
+    return doc["value"] if doc else None
+
+# --- Update system prompt for personalization ---
+def build_system_prompt(preferences=None, user_id="default"):
+    user_name = get_user_name()
+    chat_history = get_recent_chat_history(user_id)
+    base_prompt = (
+        "You are MeAI, a helpful, knowledgeable AI assistant. "
+        "You answer questions using only the provided context and your own knowledge. "
+        "If you are unsure, ask the user for clarification. "
+        "If the user's question is ambiguous or could mean multiple things, suggest clarifying questions or related topics as a list of suggestions. "
+        "Never make up names, personas, or facts. Be concise, clear, and user-centric."
+    )
+    if user_name:
+        base_prompt = f"The user's name is {user_name}. " + base_prompt
+    if chat_history:
+        base_prompt += f" Here is the recent conversation:\n{chat_history}"
+    if preferences:
+        if preferences.get("answer_style") == "concise":
+            base_prompt += " Always be concise."
+        elif preferences.get("answer_style") == "detailed":
+            base_prompt += " Always be detailed and thorough."
+        if preferences.get("tech_depth") == "basic":
+            base_prompt += " Use basic, beginner-friendly explanations."
+        elif preferences.get("tech_depth") == "advanced":
+            base_prompt += " Use advanced, technical explanations."
+        if preferences.get("language") and preferences["language"] != "English":
+            base_prompt += f" Answer in {preferences['language']}."
+    return base_prompt
+
+# --- Add chat history endpoints ---
+@app.post("/memory/chat_history")
+async def save_chat_history(request: dict):
+    user_id = request.get("user_id", "default")
+    message = request.get("message")
+    db = get_mongo()
+    db.chat_history.insert_one({"user_id": user_id, "message": message, "timestamp": time.time()})
+    return {"status": "ok"}
+
+@app.get("/memory/chat_history/{user_id}")
+async def load_chat_history(user_id: str, limit: int = 10):
+    db = get_mongo()
+    cursor = db.chat_history.find({"user_id": user_id}).sort("timestamp", -1).limit(limit)
+    history = [doc["message"] for doc in cursor][::-1]
+    # Always return as list of dicts with 'role' and 'content'
+    safe_history = []
+    for msg in history:
+        if isinstance(msg, dict) and 'role' in msg and 'content' in msg:
+            safe_history.append(msg)
+        else:
+            safe_history.append({"role": "user", "content": str(msg)})
+    return {"history": safe_history}
+
+# --- Helper to get recent chat history for prompt ---
+def get_recent_chat_history(user_id="default", limit=5):
+    db = get_mongo()
+    cursor = db.chat_history.find({"user_id": user_id}).sort("timestamp", -1).limit(limit)
+    history = [doc["message"] for doc in cursor][::-1]
+    # Summarize as a string for prompt
+    summary = ""
+    for msg in history:
+        if isinstance(msg, dict):
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+        else:
+            role = "user"
+            content = str(msg)
+        summary += f"{role.capitalize()}: {content}\n"
+    return summary.strip()
 
 if __name__ == "__main__":
     # Run with hot reload enabled

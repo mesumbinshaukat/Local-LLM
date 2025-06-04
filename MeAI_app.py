@@ -69,6 +69,9 @@ SERVER_URL = "http://localhost:8000"
 APP_NAME = "MeAI"
 BRAND = "MeAI by Mesum Bin Shaukat\nOwner of World Of Tech"
 
+# --- Add user_id for persistent memory ---
+USER_ID = "default"  # In a real app, this could be per-user or per-device
+
 class HotReloader:
     def __init__(self, app):
         self.app = app
@@ -158,6 +161,7 @@ class StreamingChatWorker(QThread):
         self.cyber_mode = cyber_mode
         self.prefs = None
         self._is_running = True
+        self.user_id = USER_ID
         
     def stop(self):
         self._is_running = False
@@ -178,7 +182,8 @@ class StreamingChatWorker(QThread):
             payload = {
                 "messages": messages,
                 "query": self.user_input,
-                "cyber_mode": self.cyber_mode
+                "cyber_mode": self.cyber_mode,
+                "user_id": self.user_id
             }
             
             if self.prefs:
@@ -198,11 +203,9 @@ class StreamingChatWorker(QThread):
                     return
                     
                 full_response = ""
-                for chunk in response.iter_content(chunk_size=None, decode_unicode=True):
+                for chunk in response.iter_lines(decode_unicode=True):
                     if not self._is_running:
-                        response.close()
                         break
-                        
                     if chunk:
                         if chunk.startswith("[ERROR]"):
                             self.error_signal.emit(chunk[7:])
@@ -210,18 +213,33 @@ class StreamingChatWorker(QThread):
                         elif chunk.startswith("[FALLBACK]"):
                             try:
                                 fallback_data = json.loads(chunk[10:])
+                                full_response += "<div style='margin:12px 0 0 0;'><b>Additional information:</b>"
+                                # Web results as cards
                                 if fallback_data.get("web_results"):
-                                    full_response += "\n\nAdditional information from web search:\n"
+                                    full_response += "<div style='margin:8px 0;'><b>Web Results:</b>"
                                     for result in fallback_data["web_results"]:
-                                        full_response += f"- {result.get('title', '')}: {result.get('body', '')}\n"
+                                        title = result.get('title', '')
+                                        body = result.get('body', '')
+                                        href = result.get('href', '')
+                                        if title or body:
+                                            full_response += f"<div style='margin:6px 0;padding:8px;border-radius:6px;background:#23272e;color:#fff;'><a href='{href}' style='color:#fbbc04;text-decoration:underline;' target='_blank'>{title}</a><br>{body}</div>"
+                                    full_response += "</div>"
+                                # RAG results as cards
                                 if fallback_data.get("rag_results"):
-                                    full_response += "\n\nRelevant information from knowledge base:\n"
+                                    full_response += "<div style='margin:8px 0;'><b>Knowledge Base:</b>"
                                     for result in fallback_data["rag_results"]:
-                                        full_response += f"- {result.get('text', '')}\n"
+                                        text = result.get('text', '')
+                                        source = result.get('source', '')
+                                        if text:
+                                            full_response += f"<div style='margin:6px 0;padding:8px;border-radius:6px;background:#1a1d21;color:#fff;'><b>Source:</b> {source}<br>{text}</div>"
+                                    full_response += "</div>"
+                                # Suggestions as buttons
                                 if fallback_data.get("suggestions"):
-                                    full_response += "\n\nRelated topics you might be interested in:\n"
+                                    full_response += "<div style='margin:8px 0;'><b>Suggestions:</b> "
                                     for suggestion in fallback_data["suggestions"]:
-                                        full_response += f"- {suggestion}\n"
+                                        full_response += f"<button style='margin:0 6px 0 0;padding:4px 10px;border-radius:6px;background:#333;color:#fff;border:none;cursor:pointer;' onclick=\"window.suggestionClicked('{suggestion}')\">{suggestion}</button>"
+                                    full_response += "</div>"
+                                full_response += "</div>"
                             except:
                                 pass
                         else:
@@ -348,6 +366,9 @@ class CategoryCard(QFrame):
             """)
 
 class MeAIApp(QMainWindow):
+    # Add a signal for log updates
+    log_update_signal = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MeAI Desktop")
@@ -403,6 +424,9 @@ class MeAIApp(QMainWindow):
         # Start data collection thread
         self.start_data_collection()
         
+        # Connect the log update signal to the update_log_viewer slot
+        self.log_update_signal.connect(self.update_log_viewer)
+        
         # Set up timer for UI updates
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_ui)
@@ -410,6 +434,10 @@ class MeAIApp(QMainWindow):
         
         # Initialize hot reloader
         self.hot_reloader = HotReloader(self)
+
+    def update_log_viewer(self, log_text):
+        """Slot to update the log viewer in the main thread."""
+        self.log_viewer.setText(log_text)
 
     def update_ui(self):
         """Update the UI with the latest data."""
@@ -522,16 +550,20 @@ class MeAIApp(QMainWindow):
         self.tabs.addTab(chat_tab, "Chat")
         
         # Initialize chat history with system context
+        user_name = get_user_name()
+        welcome_name = user_name if user_name else "there"
+        # Fetch recent chat history
+        try:
+            resp = requests.get(f"{SERVER_URL}/memory/chat_history/{USER_ID}?limit=5")
+            if resp.status_code == 200:
+                history = resp.json().get("history", [])
+                for msg in history:
+                    self.add_chat_bubble(msg.get("content", ""), user=(msg.get("role") == "user"))
+        except Exception:
+            pass
         self.chat_history_ui.append(f"""
             <p style='color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};'>
-                <b>System:</b> Welcome to MeAI! I can help you with various tasks including:
-                <ul>
-                    <li>Executing system commands</li>
-                    <li>Opening applications</li>
-                    <li>Managing files and directories</li>
-                    <li>Answering questions and providing assistance</li>
-                </ul>
-                How can I help you today?
+                <b>System:</b> Welcome to MeAI{', ' + welcome_name if welcome_name else ''}! I can help you with research, automation, code, and more. What would you like to do today?
             </p>
         """)
 
@@ -543,6 +575,14 @@ class MeAIApp(QMainWindow):
             
         # Add user message to chat
         self.add_chat_bubble(user_message, user=True)
+        
+        # Store name if user says "my name is ..."
+        if "my name is" in user_message.lower():
+            name = user_message.lower().split("my name is",1)[1].strip().split()[0].capitalize()
+            try:
+                requests.post(f"{SERVER_URL}/memory/user_info", json={"key": "name", "value": name})
+            except Exception:
+                pass
         
         # Initialize chat history if needed
         if not hasattr(self, 'chat_history') or not isinstance(self.chat_history, list):
@@ -612,22 +652,17 @@ class MeAIApp(QMainWindow):
         self.loading_label.setText("Thinking...")
         self.last_assistant_bubble_pos = None  # Reset for new response
         prefs = self.preferences.copy()
-        
-        # Log the action
         try:
             requests.post(f"{SERVER_URL}/log_action", json={"action": "chat_query", "query": user_message, "preferences": prefs})
         except Exception:
             pass
-        
-        # Start streaming worker
         self.streaming_worker = StreamingChatWorker(self.chat_history, user_message, cyber_mode=self.cyber_mode)
         self.streaming_worker.prefs = prefs
-        self.streaming_worker.partial_signal.connect(self.display_partial_response)
-        self.streaming_worker.done_signal.connect(self.display_chat_response)
-        self.streaming_worker.error_signal.connect(self.fallback_to_sync_worker)
+        self.streaming_worker.user_id = USER_ID
+        self.streaming_worker.partial_signal.connect(self.display_partial_response, Qt.ConnectionType.QueuedConnection)
+        self.streaming_worker.done_signal.connect(self.display_chat_response, Qt.ConnectionType.QueuedConnection)
+        self.streaming_worker.error_signal.connect(self.fallback_to_sync_worker, Qt.ConnectionType.QueuedConnection)
         self.streaming_worker.start()
-        
-        # Add to recent topics
         self.add_to_recent_topics(user_message, "")
 
     def send_chat(self):
@@ -641,16 +676,12 @@ class MeAIApp(QMainWindow):
         self.chat_history.append({"role": "user", "content": user_input})
         self.chat_input.clear()
         self.loading_label.setText("Thinking...")
-        self.last_assistant_bubble_pos = None  # Reset for new response
+        self.last_assistant_bubble_pos = None
         prefs = self.preferences.copy()
-        
-        # Log the action
         try:
             requests.post(f"{SERVER_URL}/log_action", json={"action": "chat_query", "query": user_input, "preferences": prefs})
         except Exception:
             pass
-            
-        # Check if it's a task request
         if self.is_task_request(user_input):
             try:
                 resp = requests.post(f"{SERVER_URL}/task/execute", json={"instruction": user_input}, timeout=10)
@@ -668,43 +699,41 @@ class MeAIApp(QMainWindow):
                 self.loading_label.setText("")
             self.add_to_recent_topics(user_input, "[Task executed]")
             return
-            
-        # Start streaming worker for regular chat
         self.streaming_worker = StreamingChatWorker(self.chat_history, user_input, cyber_mode=self.cyber_mode)
         self.streaming_worker.prefs = prefs
-        self.streaming_worker.partial_signal.connect(self.display_partial_response)
-        self.streaming_worker.done_signal.connect(self.display_chat_response)
-        self.streaming_worker.error_signal.connect(self.fallback_to_sync_worker)
+        self.streaming_worker.user_id = USER_ID
+        self.streaming_worker.partial_signal.connect(self.display_partial_response, Qt.ConnectionType.QueuedConnection)
+        self.streaming_worker.done_signal.connect(self.display_chat_response, Qt.ConnectionType.QueuedConnection)
+        self.streaming_worker.error_signal.connect(self.fallback_to_sync_worker, Qt.ConnectionType.QueuedConnection)
         self.streaming_worker.start()
         self.add_to_recent_topics(user_input, "")
 
     def display_chat_response(self, response):
         """Display the final chat response and update history."""
         self.loading_label.setText("")
-        self.add_chat_bubble(response, user=False)
-        self.chat_history.append({"role": "assistant", "content": response})
+        suggestions = None
+        if isinstance(response, dict):
+            text = response.get("response", "")
+            suggestions = response.get("suggestions", [])
+        else:
+            text = response
+        self.add_chat_bubble(text, user=False, suggestions=suggestions)
+        self.chat_history.append({"role": "assistant", "content": text})
+        # Fetch and update chat history from backend
+        try:
+            resp = requests.get(f"{SERVER_URL}/memory/chat_history/{USER_ID}?limit=10")
+            if resp.status_code == 200:
+                self.chat_history = resp.json().get("history", [])
+        except Exception:
+            pass
         self.chat_history_ui.verticalScrollBar().setValue(
             self.chat_history_ui.verticalScrollBar().maximum()
         )
 
     def display_partial_response(self, partial):
         """Display partial streaming response."""
-        if not hasattr(self, 'last_assistant_bubble_pos'):
-            self.last_assistant_bubble_pos = None
-            
-        if self.last_assistant_bubble_pos is None:
-            # Create new bubble for first chunk
-            self.add_chat_bubble(partial, user=False)
-            self.last_assistant_bubble_pos = self.chat_history_ui.document().blockCount() - 1
-        else:
-            # Update existing bubble
-            cursor = self.chat_history_ui.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.Start)
-            for _ in range(self.last_assistant_bubble_pos):
-                cursor.movePosition(QTextCursor.MoveOperation.NextBlock)
-            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
-            cursor.insertText(partial)
-                
+        # Always update UI in main thread, never use QTextCursor/block manipulation
+        self.chat_history_ui.setHtml(partial)
         self.chat_history_ui.verticalScrollBar().setValue(
             self.chat_history_ui.verticalScrollBar().maximum()
         )
@@ -721,20 +750,33 @@ class MeAIApp(QMainWindow):
     def fallback_to_sync_worker(self, error):
         """Fallback to synchronous worker if streaming fails."""
         self.worker = ChatWorker(self.chat_history, self.chat_history[-1]["content"], cyber_mode=self.cyber_mode)
-        self.worker.finished.connect(self.display_chat_response)
-        self.worker.error.connect(self.display_chat_error)
+        self.worker.finished.connect(self.display_chat_response, Qt.ConnectionType.QueuedConnection)
+        self.worker.error.connect(self.display_chat_error, Qt.ConnectionType.QueuedConnection)
         self.worker.start()
 
-    def add_chat_bubble(self, text, user=True, label=None):
+    def add_chat_bubble(self, text, user=True, label=None, suggestions=None):
         """Add a chat bubble to the UI."""
         if not hasattr(self, 'chat_history_ui'):
             return
+        user_name = get_user_name() if user else "MeAI"
         bubble = f"""
-            <p style='color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};'>
-                <b>{label if label else ('You' if user else 'MeAI')}:</b> {text}
-            </p>
+            <div style='margin:8px 0;padding:8px;border-radius:8px;background:{'#23272e' if user else '#1a1d21'};color:{'#fff' if user else '#fbbc04'};'>
+                <b>{label if label else (user_name if user else 'MeAI')}:</b> {text}
+            </div>
         """
         self.chat_history_ui.append(bubble)
+        # Add suggestions bar if present
+        if suggestions:
+            self.add_suggestions_bar(suggestions)
+
+    def add_suggestions_bar(self, suggestions):
+        if not suggestions:
+            return
+        bar = "<div style='margin:4px 0 12px 0;padding:6px 0 0 0;'><b>Suggestions:</b> "
+        for s in suggestions:
+            bar += f"<button style='margin:0 6px 0 0;padding:4px 10px;border-radius:6px;background:#333;color:#fff;border:none;cursor:pointer;' onclick=\"window.suggestionClicked('{s}')\">{s}</button>"
+        bar += "</div>"
+        self.chat_history_ui.append(bar)
 
     def clear_chat(self):
         """Clear the chat history."""
@@ -1776,7 +1818,8 @@ class MeAIApp(QMainWindow):
                     response = requests.get(f"{SERVER_URL}/logs")
                     if response.status_code == 200:
                         logs = response.json()
-                        self.log_viewer.setText("\n".join(logs))
+                        # Emit the signal with the new log text
+                        self.log_update_signal.emit("\n".join(logs))
                 except Exception:
                     pass
                 time.sleep(5)  # Update every 5 seconds
@@ -1817,6 +1860,15 @@ class MeAIApp(QMainWindow):
                 self.show_error_dialog(f"Failed to restart server: {response.text}")
         except Exception as e:
             self.show_error_dialog(f"Failed to restart server: {str(e)}")
+
+def get_user_name():
+    try:
+        resp = requests.get(f"{SERVER_URL}/memory/user_info/name")
+        if resp.status_code == 200:
+            return resp.json().get("value")
+    except Exception:
+        pass
+    return None
 
 def main():
     app = QApplication(sys.argv)
