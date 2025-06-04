@@ -127,6 +127,7 @@ class MeAIApp(QMainWindow):
         self.init_plugins_tab()
         self.init_admin_tab()
         self.init_preferences_tab()
+        self.init_dashboard_tab()
         self.statusBar().showMessage(BRAND)
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self.poll_status)
@@ -415,6 +416,9 @@ class MeAIApp(QMainWindow):
         try:
             import subprocess
             subprocess.check_output([sys.executable, "main.py", "ingest"])
+            # Notify server to increment analytics
+            import requests
+            requests.post(f"{SERVER_URL}/ingest_kb")
             self.kb_status.setText("Knowledge base ingested!")
         except Exception as e:
             self.kb_status.setText(f"Error: {e}")
@@ -1045,6 +1049,95 @@ class MeAIApp(QMainWindow):
                 self.log_display.setText("Error exporting knowledge: " + str(resp.text))
         except Exception as e:
             self.log_display.setText(f"Error: {e}")
+
+    def init_dashboard_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("<h2>Analytics Dashboard</h2>"))
+        from pyqtgraph import PlotWidget
+        self.plot_widget = PlotWidget()
+        layout.addWidget(self.plot_widget)
+        self.dashboard_stats = QTextEdit()
+        self.dashboard_stats.setReadOnly(True)
+        layout.addWidget(self.dashboard_stats)
+        refresh_btn = QPushButton("Refresh Analytics")
+        refresh_btn.clicked.connect(self.refresh_dashboard)
+        layout.addWidget(refresh_btn)
+        # Web scraping UI
+        self.scrape_input = QLineEdit()
+        self.scrape_input.setPlaceholderText("Enter URL to scrape...")
+        scrape_btn = QPushButton("Scrape Website")
+        scrape_btn.clicked.connect(self.run_scrape)
+        self.scrape_output = QTextEdit()
+        self.scrape_output.setReadOnly(True)
+        layout.addWidget(QLabel("<b>Web Scraping</b>"))
+        layout.addWidget(self.scrape_input)
+        layout.addWidget(scrape_btn)
+        layout.addWidget(self.scrape_output)
+        # Pentesting UI
+        self.pentest_input = QLineEdit()
+        self.pentest_input.setPlaceholderText("Enter target (IP or URL) for pentest...")
+        self.pentest_tool = QComboBox()
+        self.pentest_tool.addItems(["nmap", "sqlmap"])
+        pentest_btn = QPushButton("Run Pentest")
+        pentest_btn.clicked.connect(self.run_pentest)
+        self.pentest_output = QTextEdit()
+        self.pentest_output.setReadOnly(True)
+        layout.addWidget(QLabel("<b>Pentesting</b>"))
+        layout.addWidget(self.pentest_input)
+        layout.addWidget(self.pentest_tool)
+        layout.addWidget(pentest_btn)
+        layout.addWidget(self.pentest_output)
+        tab.setLayout(layout)
+        self.tabs.insertTab(1, tab, "Dashboard")
+        self.refresh_dashboard()
+
+    def refresh_dashboard(self):
+        import requests
+        try:
+            stats = requests.get(f"{SERVER_URL}/analytics").json()
+            mem_stats = requests.get(f"{SERVER_URL}/memory/usage").json()
+            self.dashboard_stats.setText(
+                f"Documents: {stats['docs']}\nRepos: {stats['repos']}\nTasks: {stats['tasks']}\nWeb Scrapes: {stats['scrapes']}\nPentest Runs: {stats['pentests']}\nRAM: {mem_stats['ram']}%\nCPU: {mem_stats['cpu']}%"
+            )
+            # Example plot: RAM usage
+            self.plot_widget.clear()
+            self.plot_widget.plot([mem_stats['ram'], mem_stats['cpu']], pen='g', symbol='o')
+        except Exception as e:
+            self.dashboard_stats.setText(f"Error: {e}")
+
+    def run_scrape(self):
+        import requests
+        url = self.scrape_input.text().strip()
+        if not url:
+            self.scrape_output.setText("No URL entered.")
+            return
+        try:
+            resp = requests.post(f"{SERVER_URL}/scrape", json={"url": url})
+            if resp.status_code == 200:
+                self.scrape_output.setText(resp.json().get("text", ""))
+                self.refresh_dashboard()
+            else:
+                self.scrape_output.setText("Error: " + str(resp.text))
+        except Exception as e:
+            self.scrape_output.setText(f"Error: {e}")
+
+    def run_pentest(self):
+        import requests
+        target = self.pentest_input.text().strip()
+        tool = self.pentest_tool.currentText()
+        if not target:
+            self.pentest_output.setText("No target entered.")
+            return
+        try:
+            resp = requests.post(f"{SERVER_URL}/pentest", json={"target": target, "tool": tool})
+            if resp.status_code == 200:
+                self.pentest_output.setText(resp.json().get("result", ""))
+                self.refresh_dashboard()
+            else:
+                self.pentest_output.setText("Error: " + str(resp.text))
+        except Exception as e:
+            self.pentest_output.setText(f"Error: {e}")
 
 def main():
     app = QApplication(sys.argv)

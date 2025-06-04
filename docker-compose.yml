@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  meai:
+    build: .
+    ports:
+      - "8000:8000"
+      - "8501:8501"
+    volumes:
+      - ./models:/app/models
+      - ./chroma_db:/app/chroma_db
+      - ./chroma_db_backups:/app/chroma_db_backups
+      - ./knowledge:/app/knowledge
+    restart: unless-stopped 

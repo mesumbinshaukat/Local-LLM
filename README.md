@@ -135,3 +135,63 @@ Owner of World Of Tech
 ---
 
 *This project is under active development. More features, optimizations, and UI/UX improvements coming soon!*
+
+## 🚀 Roadmap & New Features
+
+### Compatibility
+- Runs on Windows and Linux (via Docker)
+- Dockerfile and docker-compose for easy deployment
+
+### Capabilities
+- Web scraping (BeautifulSoup, requests-html)
+- Pentesting tools (nmap, sqlmap integration)
+- Self-training and dynamic ingestion (repos, PDFs, URLs)
+- Natural language command execution
+- Analytics dashboard (visualizes data, training, tasks, resource usage)
+
+### Installation
+1. Clone the repo
+2. Install Python 3.10+
+3. `pip install -r requirements.txt`
+4. (Optional) Use Docker:
+   ```
+   docker build -t meai .
+   docker run -p 8000:8000 -p 8501:8501 meai
+   ```
+
+### Usage
+- Run the desktop app: `python MeAI_app.py`
+- Run the server: `python llm_server.py`
+- Use Docker for full-stack deployment
+
+### Dashboard
+- Access analytics and visualizations from the new Dashboard tab in the desktop app
+
+### Web Scraping & Pentesting
+- Use natural language to trigger scraping or pentesting tasks
+- Results and logs are visualized in the dashboard
+
+## 🖥️ Dashboard & Analytics
+
+- The new Dashboard tab in the desktop app visualizes:
+  - Number of documents ingested
+  - Number of repos cloned
+  - Number of tasks executed
+  - Web scraping and pentesting activity
+  - Resource usage (RAM, CPU)
+- You can trigger web scraping and pentesting tasks directly from the dashboard tab.
+
+## 🕸️ Web Scraping
+- Use the Dashboard tab or the API:
+  - POST /scrape {"url": "https://example.com"}
+  - Returns the scraped text content of the page.
+
+## 🛡️ Pentesting
+- Use the Dashboard tab or the API:
+  - POST /pentest {"target": "example.com", "tool": "nmap"} or {"target": "http://testphp.vulnweb.com", "tool": "sqlmap"}
+  - Returns scan results (top ports for nmap, SQLi test for sqlmap).
+
+## 📊 Analytics API
+- GET /analytics returns current stats for dashboard visualizations.
+
+---

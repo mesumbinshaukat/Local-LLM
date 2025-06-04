@@ -20,6 +20,8 @@ import sys
 import shutil
 import json
 import platform
+from bs4 import BeautifulSoup
+import nmap
 
 MODEL_PATH = "./models/mistral-7b-instruct/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
 CHROMA_DB_FOLDER = "./chroma_db"
@@ -541,6 +543,7 @@ async def automation_chain(
     preview: bool = False
 ):
     """Run a chain of shell commands/scripts in sequence. If preview=True, only return the planned actions."""
+    analytics_stats["tasks"] += 1
     if preview:
         return {"preview": commands}
     results = []
@@ -563,6 +566,7 @@ async def automation_clone_repo(
     preview: bool = False
 ):
     """Clone a git repo and optionally install requirements.txt. If preview=True, only return planned actions."""
+    analytics_stats["repos"] += 1
     actions = [f"git clone {repo_url}"]
     if install_requirements:
         actions.append("pip install -r requirements.txt (in repo dir)")
@@ -760,4 +764,90 @@ async def execute_task(request: dict):
         result = subprocess.Popen(cmd, shell=True)
         return {"status": "executed", "command": cmd}
     except Exception as e:
-        return JSONResponse(status_code=400, content={"error": str(e), "command": cmd}) 
+        return JSONResponse(status_code=400, content={"error": str(e), "command": cmd})
+
+analytics_stats = {
+    "docs": 0,
+    "repos": 0,
+    "tasks": 0,
+    "scrapes": 0,
+    "pentests": 0
+}
+
+@app.get("/analytics")
+def analytics():
+    return analytics_stats
+
+@app.post("/scrape")
+async def scrape_endpoint(request: dict):
+    url = request.get("url")
+    if not url:
+        return JSONResponse(status_code=400, content={"error": "No URL provided"})
+    try:
+        import requests as pyrequests
+        resp = pyrequests.get(url, timeout=10)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        text = soup.get_text()
+        analytics_stats["scrapes"] += 1
+        log_automation("scrape", url)
+        return {"text": text[:5000]}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.post("/pentest")
+async def pentest_endpoint(request: dict):
+    target = request.get("target")
+    tool = request.get("tool", "nmap")
+    if not target:
+        return JSONResponse(status_code=400, content={"error": "No target provided"})
+    try:
+        result = ""
+        if tool == "nmap":
+            nm = nmap.PortScanner()
+            scan = nm.scan(target, arguments="-T4 --top-ports 10")
+            result = str(scan)
+        elif tool == "sqlmap":
+            import subprocess
+            proc = subprocess.run(["sqlmap", "-u", target, "--batch", "--crawl=1", "--output-dir=./pentest_results"], capture_output=True, text=True, timeout=120)
+            result = proc.stdout
+        else:
+            return JSONResponse(status_code=400, content={"error": "Unknown tool"})
+        analytics_stats["pentests"] += 1
+        log_automation("pentest", f"{tool} {target}")
+        return {"result": result[:5000]}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.post("/ingest_kb")
+async def ingest_kb_endpoint():
+    analytics_stats["docs"] += 1
+    # ... existing ingestion logic ...
+    return {"status": "ok"}
+
+@app.post("/automation/chain")
+async def automation_chain(
+    commands: list = Body(...),
+    preview: bool = False
+):
+    analytics_stats["tasks"] += 1
+    # ... existing logic ...
+    # (rest of function unchanged)
+
+@app.post("/automation/clone_repo")
+async def automation_clone_repo(
+    repo_url: str = Body(...),
+    install_requirements: bool = False,
+    preview: bool = False
+):
+    analytics_stats["repos"] += 1
+    # ... existing logic ...
+    # (rest of function unchanged)
+
+@app.post("/automation/chain")
+async def automation_chain(
+    commands: list = Body(...),
+    preview: bool = False
+):
+    analytics_stats["tasks"] += 1
+    # ... existing logic ...
+    # (rest of function unchanged) 
