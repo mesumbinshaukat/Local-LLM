@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QFrame, QScrollArea, QGridLayout, QFileDialog,
                             QMessageBox, QCheckBox, QInputDialog, QListWidget,
                             QListWidgetItem, QSplitter, QGroupBox, QTabBar)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve, QSize, QFileSystemWatcher, QUrl
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve, QSize, QFileSystemWatcher, QUrl, QMetaObject, Q_ARG
 from PyQt6.QtGui import QFont, QPalette, QColor, QLinearGradient, QGradient, QIcon, QTextCharFormat, QTextCursor, QPainter
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 
@@ -132,7 +132,8 @@ class ChatWorker(QThread):
             # Make the request
             response = requests.post(
                 f"{SERVER_URL}/chat",
-                json=payload
+                json=payload,
+                timeout=30  # Add timeout
             )
             
             if response.status_code != 200:
@@ -156,6 +157,10 @@ class StreamingChatWorker(QThread):
         self.user_input = user_input
         self.cyber_mode = cyber_mode
         self.prefs = None
+        self._is_running = True
+        
+    def stop(self):
+        self._is_running = False
         
     def run(self):
         try:
@@ -179,46 +184,52 @@ class StreamingChatWorker(QThread):
             if self.prefs:
                 payload["preferences"] = self.prefs
             
-            # Make the streaming request
-            response = requests.post(
-                f"{SERVER_URL}/chat/stream",
-                json=payload,
-                stream=True
-            )
-            
-            if response.status_code != 200:
-                self.error_signal.emit(f"Error: {response.status_code} - {response.text}")
-                return
+            # Make the streaming request with timeout
+            with requests.Session() as session:
+                response = session.post(
+                    f"{SERVER_URL}/chat/stream",
+                    json=payload,
+                    stream=True,
+                    timeout=30
+                )
                 
-            full_response = ""
-            for chunk in response.iter_content(chunk_size=None, decode_unicode=True):
-                if chunk:
-                    if chunk.startswith("[ERROR]"):
-                        self.error_signal.emit(chunk[7:])
-                        return
-                    elif chunk.startswith("[FALLBACK]"):
-                        # Handle fallback data
-                        try:
-                            fallback_data = json.loads(chunk[10:])
-                            if fallback_data.get("web_results"):
-                                full_response += "\n\nAdditional information from web search:\n"
-                                for result in fallback_data["web_results"]:
-                                    full_response += f"- {result.get('title', '')}: {result.get('body', '')}\n"
-                            if fallback_data.get("rag_results"):
-                                full_response += "\n\nRelevant information from knowledge base:\n"
-                                for result in fallback_data["rag_results"]:
-                                    full_response += f"- {result.get('text', '')}\n"
-                            if fallback_data.get("suggestions"):
-                                full_response += "\n\nRelated topics you might be interested in:\n"
-                                for suggestion in fallback_data["suggestions"]:
-                                    full_response += f"- {suggestion}\n"
-                        except:
-                            pass
-                    else:
-                        full_response += chunk
-                        self.partial_signal.emit(full_response)
-            
-            self.done_signal.emit(full_response)
+                if response.status_code != 200:
+                    self.error_signal.emit(f"Error: {response.status_code} - {response.text}")
+                    return
+                    
+                full_response = ""
+                for chunk in response.iter_content(chunk_size=None, decode_unicode=True):
+                    if not self._is_running:
+                        response.close()
+                        break
+                        
+                    if chunk:
+                        if chunk.startswith("[ERROR]"):
+                            self.error_signal.emit(chunk[7:])
+                            return
+                        elif chunk.startswith("[FALLBACK]"):
+                            try:
+                                fallback_data = json.loads(chunk[10:])
+                                if fallback_data.get("web_results"):
+                                    full_response += "\n\nAdditional information from web search:\n"
+                                    for result in fallback_data["web_results"]:
+                                        full_response += f"- {result.get('title', '')}: {result.get('body', '')}\n"
+                                if fallback_data.get("rag_results"):
+                                    full_response += "\n\nRelevant information from knowledge base:\n"
+                                    for result in fallback_data["rag_results"]:
+                                        full_response += f"- {result.get('text', '')}\n"
+                                if fallback_data.get("suggestions"):
+                                    full_response += "\n\nRelated topics you might be interested in:\n"
+                                    for suggestion in fallback_data["suggestions"]:
+                                        full_response += f"- {suggestion}\n"
+                            except:
+                                pass
+                        else:
+                            full_response += chunk
+                            self.partial_signal.emit(full_response)
+                
+                if self._is_running:
+                    self.done_signal.emit(full_response)
             
         except Exception as e:
             self.error_signal.emit(str(e))
@@ -371,19 +382,21 @@ class MeAIApp(QMainWindow):
         layout.addWidget(self.tabs)
         
         # Create and add all main tabs
-        self.create_chat_tab()                # Adds Chat tab
-        self.create_analytics_tab()           # Adds Analytics tab
-        self.create_settings_tab()            # Adds Settings tab
-        self.create_pentest_tab()             # Adds Pentest tab
-        self.tabs.addTab(self.create_web_tab(), "Web")      # Adds Web tab
-        self.tabs.addTab(self.create_backup_tab(), "Backup") # Adds Backup tab
+        self.create_chat_tab()                # Chat tab
+        self.create_knowledge_tab()           # Knowledge tab
+        self.create_code_tab()                # Code tab
+        self.create_automation_tab()          # Automation tab
+        self.create_plugins_tab()             # Plugins tab
+        self.create_admin_tab()               # Admin tab
+        self.create_web_tab()                 # Web tab
+        self.create_settings_tab()            # Settings tab
         
         # Apply dark mode to the entire app after all tabs are created
         self.update_theme()
         
         # Initialize data structures
         self.training_data = defaultdict(int)
-        self.category_data = defaultdict(int)  # Changed back to defaultdict(int)
+        self.category_data = defaultdict(int)
         self.recent_activities = []
         self.data_queue = queue.Queue()
         
@@ -397,7 +410,7 @@ class MeAIApp(QMainWindow):
         
         # Initialize hot reloader
         self.hot_reloader = HotReloader(self)
-        
+
     def update_ui(self):
         """Update the UI with the latest data."""
         try:
@@ -544,7 +557,8 @@ class MeAIApp(QMainWindow):
             try:
                 response = requests.post(
                     f"{SERVER_URL}/task/execute",
-                    json={"instruction": user_message}
+                    json={"instruction": user_message},
+                    timeout=30
                 )
                 if response.status_code == 200:
                     result = response.json()
@@ -560,13 +574,12 @@ class MeAIApp(QMainWindow):
                     self.add_chat_bubble(error_msg, user=False, label="Task Error")
                     self.chat_history.append({"role": "assistant", "content": error_msg})
             except Exception as e:
-                error_msg = str(e)
+                error_msg = f"Error executing command: {str(e)}"
                 self.add_chat_bubble(error_msg, user=False, label="Task Error")
                 self.chat_history.append({"role": "assistant", "content": error_msg})
-            return  # Exit after handling task execution
-            
-        # If not a task request, proceed with normal chat processing
-        self.process_chat_message(user_message)
+        else:
+            # Process as regular chat message
+            self.process_chat_message(user_message)
 
     def is_task_request(self, text):
         """Check if the text is a system command request."""
@@ -706,7 +719,7 @@ class MeAIApp(QMainWindow):
         )
 
     def fallback_to_sync_worker(self, error):
-        # If streaming fails, fallback to old worker
+        """Fallback to synchronous worker if streaming fails."""
         self.worker = ChatWorker(self.chat_history, self.chat_history[-1]["content"], cyber_mode=self.cyber_mode)
         self.worker.finished.connect(self.display_chat_response)
         self.worker.error.connect(self.display_chat_error)
@@ -764,15 +777,19 @@ class MeAIApp(QMainWindow):
             QMessageBox.critical(self, "Error", f"Could not open log file: {e}")
 
     def restart_server(self):
-        # Attempt to restart the server in a new process (Windows only for now)
+        """Restart the FastAPI server."""
         try:
-            if os.name == 'nt':
-                subprocess.Popen(["cmd.exe", "/c", "start", "python", "main.py", "server"])
-                QMessageBox.information(self, "Restart Server", "Attempted to restart the server. Please check the server window.")
+            response = requests.post(f"{SERVER_URL}/restart")
+            if response.status_code == 200:
+                self.server_status.setText("Server: Restarting...")
+                # Wait for server to restart
+                time.sleep(2)
+                self.refresh_logs()
+                self.server_status.setText("Server: Running")
             else:
-                QMessageBox.information(self, "Restart Server", "Please restart the server manually in your terminal.")
+                self.show_error_dialog(f"Failed to restart server: {response.text}")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not restart server: {e}")
+            self.show_error_dialog(f"Failed to restart server: {str(e)}")
 
     def create_analytics_tab(self):
         """Create the analytics tab with charts and statistics."""
@@ -1234,6 +1251,572 @@ class MeAIApp(QMainWindow):
             requests.post(f"{SERVER_URL}/memory/recent_topics", json={"topics": self.recent_topics})
         except Exception:
             pass
+
+    def create_knowledge_tab(self):
+        """Create the knowledge tab for managing the knowledge base."""
+        knowledge_tab = QWidget()
+        layout = QVBoxLayout(knowledge_tab)
+        
+        # Header
+        header = QLabel("Knowledge Base")
+        header.setStyleSheet(f"""
+            QLabel {{
+                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
+                font-size: 24px;
+                font-weight: bold;
+                padding: 20px;
+            }}
+        """)
+        layout.addWidget(header)
+        
+        # Document list
+        list_group = QGroupBox("Documents")
+        list_layout = QVBoxLayout()
+        self.document_list = QListWidget()
+        self.document_list.itemClicked.connect(self.show_document_details)
+        list_layout.addWidget(self.document_list)
+        list_group.setLayout(list_layout)
+        layout.addWidget(list_group)
+        
+        # Document details
+        details_group = QGroupBox("Document Details")
+        details_layout = QVBoxLayout()
+        self.document_details = QTextEdit()
+        self.document_details.setReadOnly(True)
+        details_layout.addWidget(self.document_details)
+        details_group.setLayout(details_layout)
+        layout.addWidget(details_group)
+        
+        # Control buttons
+        button_layout = QHBoxLayout()
+        
+        add_btn = QPushButton("Add Document")
+        add_btn.clicked.connect(self.add_document)
+        button_layout.addWidget(add_btn)
+        
+        remove_btn = QPushButton("Remove Document")
+        remove_btn.clicked.connect(self.remove_document)
+        button_layout.addWidget(remove_btn)
+        
+        ingest_btn = QPushButton("Ingest Knowledge")
+        ingest_btn.clicked.connect(self.ingest_knowledge)
+        button_layout.addWidget(ingest_btn)
+        
+        layout.addLayout(button_layout)
+        
+        self.tabs.addTab(knowledge_tab, "Knowledge")
+        
+        # Load initial documents
+        self.load_documents()
+
+    def load_documents(self):
+        """Load available documents from the knowledge base."""
+        try:
+            response = requests.get(f"{SERVER_URL}/knowledge/list")
+            if response.status_code == 200:
+                documents = response.json()
+                self.document_list.clear()
+                for doc in documents:
+                    self.document_list.addItem(doc["name"])
+        except Exception as e:
+            self.show_error_dialog(f"Failed to load documents: {str(e)}")
+
+    def add_document(self):
+        """Add a new document to the knowledge base."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Document",
+            "",
+            "All Files (*.*);;Text Files (*.txt);;PDF Files (*.pdf);;Markdown Files (*.md)"
+        )
+        if file_path:
+            try:
+                with open(file_path, 'rb') as f:
+                    files = {'file': f}
+                    response = requests.post(f"{SERVER_URL}/knowledge/add", files=files)
+                    if response.status_code == 200:
+                        self.load_documents()
+                    else:
+                        self.show_error_dialog(f"Failed to add document: {response.text}")
+            except Exception as e:
+                self.show_error_dialog(f"Failed to add document: {str(e)}")
+
+    def remove_document(self):
+        """Remove the selected document from the knowledge base."""
+        current_item = self.document_list.currentItem()
+        if not current_item:
+            return
+            
+        doc_name = current_item.text()
+        try:
+            response = requests.delete(f"{SERVER_URL}/knowledge/remove", params={"name": doc_name})
+            if response.status_code == 200:
+                self.load_documents()
+                self.document_details.clear()
+            else:
+                self.show_error_dialog(f"Failed to remove document: {response.text}")
+        except Exception as e:
+            self.show_error_dialog(f"Failed to remove document: {str(e)}")
+
+    def ingest_knowledge(self):
+        """Ingest all documents in the knowledge base."""
+        try:
+            response = requests.post(f"{SERVER_URL}/knowledge/ingest")
+            if response.status_code == 200:
+                QMessageBox.information(self, "Success", "Knowledge base ingestion completed successfully.")
+            else:
+                self.show_error_dialog(f"Failed to ingest knowledge: {response.text}")
+        except Exception as e:
+            self.show_error_dialog(f"Failed to ingest knowledge: {str(e)}")
+
+    def show_document_details(self, item):
+        """Show details of the selected document."""
+        try:
+            doc_name = item.text()
+            response = requests.get(f"{SERVER_URL}/knowledge/details", params={"name": doc_name})
+            if response.status_code == 200:
+                details = response.json()
+                self.document_details.setText(
+                    f"Name: {details.get('name', '')}\n"
+                    f"Type: {details.get('type', '')}\n"
+                    f"Size: {details.get('size', '')}\n"
+                    f"Last Modified: {details.get('modified', '')}\n"
+                    f"Content Preview:\n{details.get('preview', '')}"
+                )
+            else:
+                self.document_details.setText(f"Error: {response.text}")
+        except Exception as e:
+            self.document_details.setText(f"Error: {str(e)}")
+
+    def show_task_details(self, item):
+        """Show details of the selected task."""
+        try:
+            task_name = item.text().split(" - ")[0].replace("Task: ", "")
+            response = requests.get(f"{SERVER_URL}/task/details", params={"name": task_name})
+            if response.status_code == 200:
+                details = response.json()
+                self.task_details.setText(
+                    f"Task: {details.get('name', '')}\n"
+                    f"Status: {details.get('status', '')}\n"
+                    f"Output: {details.get('output', '')}\n"
+                    f"Error: {details.get('error', '')}\n"
+                    f"Start Time: {details.get('start_time', '')}\n"
+                    f"End Time: {details.get('end_time', '')}"
+                )
+            else:
+                self.task_details.setText(f"Error: {response.text}")
+        except Exception as e:
+            self.task_details.setText(f"Error: {str(e)}")
+
+    def show_plugin_details(self, item):
+        """Show details of the selected plugin."""
+        try:
+            plugin_name = item.text()
+            response = requests.get(f"{SERVER_URL}/plugins/details", params={"name": plugin_name})
+            if response.status_code == 200:
+                details = response.json()
+                self.plugin_details.setText(
+                    f"Name: {details.get('name', '')}\n"
+                    f"Description: {details.get('description', '')}\n"
+                    f"Version: {details.get('version', '')}\n"
+                    f"Author: {details.get('author', '')}\n"
+                    f"Last Modified: {details.get('modified', '')}\n"
+                    f"Usage:\n{details.get('usage', '')}"
+                )
+            else:
+                self.plugin_details.setText(f"Error: {response.text}")
+        except Exception as e:
+            self.plugin_details.setText(f"Error: {str(e)}")
+
+    def create_code_tab(self):
+        """Create the code tab for executing Python code."""
+        code_tab = QWidget()
+        layout = QVBoxLayout(code_tab)
+        
+        # Header
+        header = QLabel("Code Execution")
+        header.setStyleSheet(f"""
+            QLabel {{
+                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
+                font-size: 24px;
+                font-weight: bold;
+                padding: 20px;
+            }}
+        """)
+        layout.addWidget(header)
+        
+        # Code editor
+        editor_group = QGroupBox("Code Editor")
+        editor_layout = QVBoxLayout()
+        self.code_editor = QTextEdit()
+        self.code_editor.setPlaceholderText("Enter Python code here...")
+        editor_layout.addWidget(self.code_editor)
+        editor_group.setLayout(editor_layout)
+        layout.addWidget(editor_group)
+        
+        # Output area
+        output_group = QGroupBox("Output")
+        output_layout = QVBoxLayout()
+        self.code_output = QTextEdit()
+        self.code_output.setReadOnly(True)
+        output_layout.addWidget(self.code_output)
+        output_group.setLayout(output_layout)
+        layout.addWidget(output_group)
+        
+        # Control buttons
+        button_layout = QHBoxLayout()
+        
+        execute_btn = QPushButton("Execute")
+        execute_btn.clicked.connect(self.execute_code)
+        button_layout.addWidget(execute_btn)
+        
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(self.clear_code)
+        button_layout.addWidget(clear_btn)
+        
+        layout.addLayout(button_layout)
+        
+        self.tabs.addTab(code_tab, "Code")
+
+    def execute_code(self):
+        """Execute Python code."""
+        code = self.code_editor.toPlainText()
+        if not code:
+            return
+            
+        try:
+            response = requests.post(
+                f"{SERVER_URL}/code/execute",
+                json={"code": code}
+            )
+            if response.status_code == 200:
+                result = response.json()
+                self.code_output.setText(result.get("output", ""))
+            else:
+                self.code_output.setText(f"Error: {response.text}")
+        except Exception as e:
+            self.code_output.setText(f"Error: {str(e)}")
+
+    def clear_code(self):
+        """Clear the code editor and output."""
+        self.code_editor.clear()
+        self.code_output.clear()
+
+    def create_automation_tab(self):
+        """Create the automation tab for task automation."""
+        automation_tab = QWidget()
+        layout = QVBoxLayout(automation_tab)
+        
+        # Header
+        header = QLabel("Task Automation")
+        header.setStyleSheet(f"""
+            QLabel {{
+                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
+                font-size: 24px;
+                font-weight: bold;
+                padding: 20px;
+            }}
+        """)
+        layout.addWidget(header)
+        
+        # Task input
+        input_group = QGroupBox("Task Input")
+        input_layout = QVBoxLayout()
+        self.task_input = QTextEdit()
+        self.task_input.setPlaceholderText("Enter task instructions here...")
+        input_layout.addWidget(self.task_input)
+        input_group.setLayout(input_layout)
+        layout.addWidget(input_group)
+        
+        # Task list
+        list_group = QGroupBox("Task History")
+        list_layout = QVBoxLayout()
+        self.task_list = QListWidget()
+        self.task_list.itemClicked.connect(self.show_task_details)
+        list_layout.addWidget(self.task_list)
+        list_group.setLayout(list_layout)
+        layout.addWidget(list_group)
+        
+        # Task details
+        details_group = QGroupBox("Task Details")
+        details_layout = QVBoxLayout()
+        self.task_details = QTextEdit()
+        self.task_details.setReadOnly(True)
+        details_layout.addWidget(self.task_details)
+        details_group.setLayout(details_layout)
+        layout.addWidget(details_group)
+        
+        # Control buttons
+        button_layout = QHBoxLayout()
+        
+        execute_btn = QPushButton("Execute Task")
+        execute_btn.clicked.connect(self.execute_task)
+        button_layout.addWidget(execute_btn)
+        
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(self.clear_task)
+        button_layout.addWidget(clear_btn)
+        
+        layout.addLayout(button_layout)
+        
+        self.tabs.addTab(automation_tab, "Automation")
+
+    def execute_task(self):
+        """Execute an automation task."""
+        task = self.task_input.toPlainText()
+        if not task:
+            return
+            
+        try:
+            response = requests.post(
+                f"{SERVER_URL}/task/execute",
+                json={"instruction": task}
+            )
+            if response.status_code == 200:
+                result = response.json()
+                self.task_list.addItem(f"Task: {task} - Status: {result.get('status', 'unknown')}")
+                self.task_input.clear()
+            else:
+                self.show_error_dialog(f"Failed to execute task: {response.text}")
+        except Exception as e:
+            self.show_error_dialog(f"Failed to execute task: {str(e)}")
+
+    def clear_task(self):
+        """Clear the task input and details."""
+        self.task_input.clear()
+        self.task_details.clear()
+
+    def create_plugins_tab(self):
+        """Create the plugins tab for plugin management."""
+        plugins_tab = QWidget()
+        layout = QVBoxLayout(plugins_tab)
+        
+        # Header
+        header = QLabel("Plugin Management")
+        header.setStyleSheet(f"""
+            QLabel {{
+                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
+                font-size: 24px;
+                font-weight: bold;
+                padding: 20px;
+            }}
+        """)
+        layout.addWidget(header)
+        
+        # Plugin list
+        list_group = QGroupBox("Available Plugins")
+        list_layout = QVBoxLayout()
+        self.plugin_list = QListWidget()
+        self.plugin_list.itemClicked.connect(self.show_plugin_details)
+        list_layout.addWidget(self.plugin_list)
+        list_group.setLayout(list_layout)
+        layout.addWidget(list_group)
+        
+        # Plugin details
+        details_group = QGroupBox("Plugin Details")
+        details_layout = QVBoxLayout()
+        self.plugin_details = QTextEdit()
+        self.plugin_details.setReadOnly(True)
+        details_layout.addWidget(self.plugin_details)
+        details_group.setLayout(details_layout)
+        layout.addWidget(details_group)
+        
+        # Control buttons
+        button_layout = QHBoxLayout()
+        
+        add_btn = QPushButton("Add Plugin")
+        add_btn.clicked.connect(self.add_plugin)
+        button_layout.addWidget(add_btn)
+        
+        remove_btn = QPushButton("Remove Plugin")
+        remove_btn.clicked.connect(self.remove_plugin)
+        button_layout.addWidget(remove_btn)
+        
+        run_btn = QPushButton("Run Plugin")
+        run_btn.clicked.connect(self.run_plugin)
+        button_layout.addWidget(run_btn)
+        
+        layout.addLayout(button_layout)
+        
+        self.tabs.addTab(plugins_tab, "Plugins")
+        
+        # Load initial plugins
+        self.load_plugins()
+
+    def load_plugins(self):
+        """Load available plugins."""
+        try:
+            response = requests.get(f"{SERVER_URL}/plugins/list")
+            if response.status_code == 200:
+                plugins = response.json()
+                self.plugin_list.clear()
+                for plugin in plugins:
+                    self.plugin_list.addItem(plugin["name"])
+        except Exception as e:
+            self.show_error_dialog(f"Failed to load plugins: {str(e)}")
+
+    def add_plugin(self):
+        """Add a new plugin."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Plugin",
+            "",
+            "Python Files (*.py)"
+        )
+        if file_path:
+            try:
+                with open(file_path, 'rb') as f:
+                    files = {'file': f}
+                    response = requests.post(f"{SERVER_URL}/plugins/add", files=files)
+                    if response.status_code == 200:
+                        self.load_plugins()
+                    else:
+                        self.show_error_dialog(f"Failed to add plugin: {response.text}")
+            except Exception as e:
+                self.show_error_dialog(f"Failed to add plugin: {str(e)}")
+
+    def remove_plugin(self):
+        """Remove the selected plugin."""
+        current_item = self.plugin_list.currentItem()
+        if not current_item:
+            return
+            
+        plugin_name = current_item.text()
+        try:
+            response = requests.delete(f"{SERVER_URL}/plugins/remove", params={"name": plugin_name})
+            if response.status_code == 200:
+                self.load_plugins()
+                self.plugin_details.clear()
+            else:
+                self.show_error_dialog(f"Failed to remove plugin: {response.text}")
+        except Exception as e:
+            self.show_error_dialog(f"Failed to remove plugin: {str(e)}")
+
+    def run_plugin(self):
+        """Run the selected plugin."""
+        current_item = self.plugin_list.currentItem()
+        if not current_item:
+            return
+            
+        plugin_name = current_item.text()
+        try:
+            response = requests.post(
+                f"{SERVER_URL}/plugins/run",
+                json={"name": plugin_name}
+            )
+            if response.status_code == 200:
+                result = response.json()
+                self.plugin_details.setText(f"Output: {result.get('output', '')}")
+            else:
+                self.show_error_dialog(f"Failed to run plugin: {response.text}")
+        except Exception as e:
+            self.show_error_dialog(f"Failed to run plugin: {str(e)}")
+
+    def create_admin_tab(self):
+        """Create the admin tab for logs and server management."""
+        admin_tab = QWidget()
+        layout = QVBoxLayout(admin_tab)
+        
+        # Header
+        header = QLabel("Server Management")
+        header.setStyleSheet(f"""
+            QLabel {{
+                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
+                font-size: 24px;
+                font-weight: bold;
+                padding: 20px;
+            }}
+        """)
+        layout.addWidget(header)
+        
+        # Server status
+        status_group = QGroupBox("Server Status")
+        status_layout = QVBoxLayout()
+        self.server_status = QLabel("Checking server status...")
+        status_layout.addWidget(self.server_status)
+        status_group.setLayout(status_layout)
+        layout.addWidget(status_group)
+        
+        # Log viewer
+        log_group = QGroupBox("Server Logs")
+        log_layout = QVBoxLayout()
+        self.log_viewer = QTextEdit()
+        self.log_viewer.setReadOnly(True)
+        log_layout.addWidget(self.log_viewer)
+        log_group.setLayout(log_layout)
+        layout.addWidget(log_group)
+        
+        # Control buttons
+        button_layout = QHBoxLayout()
+        
+        refresh_btn = QPushButton("Refresh Logs")
+        refresh_btn.clicked.connect(self.refresh_logs)
+        button_layout.addWidget(refresh_btn)
+        
+        restart_btn = QPushButton("Restart Server")
+        restart_btn.clicked.connect(self.restart_server)
+        button_layout.addWidget(restart_btn)
+        
+        clear_btn = QPushButton("Clear Logs")
+        clear_btn.clicked.connect(self.clear_logs)
+        button_layout.addWidget(clear_btn)
+        
+        layout.addLayout(button_layout)
+        
+        self.tabs.addTab(admin_tab, "Admin")
+        
+        # Start log monitoring
+        self.start_log_monitoring()
+
+    def start_log_monitoring(self):
+        """Start monitoring server logs."""
+        def monitor_logs():
+            while True:
+                try:
+                    response = requests.get(f"{SERVER_URL}/logs")
+                    if response.status_code == 200:
+                        logs = response.json()
+                        self.log_viewer.setText("\n".join(logs))
+                except Exception:
+                    pass
+                time.sleep(5)  # Update every 5 seconds
+        
+        thread = threading.Thread(target=monitor_logs, daemon=True)
+        thread.start()
+
+    def refresh_logs(self):
+        """Refresh the log viewer."""
+        try:
+            response = requests.get(f"{SERVER_URL}/logs")
+            if response.status_code == 200:
+                logs = response.json()
+                self.log_viewer.setText("\n".join(logs))
+        except Exception as e:
+            self.show_error_dialog(f"Failed to refresh logs: {str(e)}")
+
+    def clear_logs(self):
+        """Clear the server logs."""
+        try:
+            response = requests.post(f"{SERVER_URL}/logs/clear")
+            if response.status_code == 200:
+                self.log_viewer.clear()
+            else:
+                self.show_error_dialog(f"Failed to clear logs: {response.text}")
+        except Exception as e:
+            self.show_error_dialog(f"Failed to clear logs: {str(e)}")
+
+    def restart_server(self):
+        """Restart the server."""
+        try:
+            response = requests.post(f"{SERVER_URL}/restart")
+            if response.status_code == 200:
+                self.server_status.setText("Server is restarting...")
+                time.sleep(2)  # Wait for server to restart
+                self.server_status.setText("Server is running")
+            else:
+                self.show_error_dialog(f"Failed to restart server: {response.text}")
+        except Exception as e:
+            self.show_error_dialog(f"Failed to restart server: {str(e)}")
 
 def main():
     app = QApplication(sys.argv)
