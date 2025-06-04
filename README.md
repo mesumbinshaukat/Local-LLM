@@ -1,24 +1,29 @@
-# Local LLM Assistant (MeAI)
+# MeAI: Local AGI Assistant
 
-A fully local, limitless LLM assistant for research, web search, task execution, code, and training on your own data. No cloud dependencies, no API keys, no telemetry. Portable, robust, and beautiful.
+A fully local, advanced, and unrestricted LLM assistant for research, automation, code execution, and self-improvement. No cloud, no API keys, no censorship. Powered by llama-cpp-python (GGUF models), ChromaDB (RAG), FastAPI backend, and a modern PyQt6 desktop app.
 
 ---
 
-## Features
+## Key Features
 
-- **Fully Local LLM**: Runs Mistral-7B, TinyLlama, or any GGUF model via llama-cpp-python. No internet or API keys required.
-- **FastAPI Server**: Loads the LLM once and serves all requests (chat, RAG, code, automation, memory) for instant responses.
-- **Modern Desktop App (MeAI)**: PyQt6, dark mode, tabs for Chat, Knowledge Base, Web Search, Code Execution, and Task Automation. Inspired by Peices.ai.
-- **Streaming Chat**: Real-time "thinking" preview as the LLM generates output. No more timeouts or waiting in the dark.
-- **Robust Error Handling**: Error dialogs, logs, and status polling for a flawless user experience.
-- **Knowledge Base (RAG)**: Ingest and search your own PDFs, text, markdown, and code using ChromaDB. Recursive, deduplicated, and robust.
-- **Web Search**: DuckDuckGo search (no API key needed) from both CLI and desktop app.
-- **Code Execution & Automation**: Run Python code or shell commands safely from the app.
-- **Persistent Memory**: Store and retrieve key-value data using MongoDB.
-- **Build System**: One-click build for a portable Windows .exe (PyInstaller).
-- **Cybersecurity Mode**: Toggle in the app for expert, technical answers (hacking, networking, scripting, etc.).
-- **CLI & GUI**: Use from the command line or the beautiful desktop app.
-- **Portable & Private**: Everything runs in a virtual environment. No cloud, no telemetry, no vendor lock-in.
+- **Fully Local LLM**: Run Mistral-7B, TinyLlama, or any GGUF model with llama-cpp-python. No internet or API keys required.
+- **Streaming Chat**: Real-time, live "thinking" previews as the LLM generates output. No more waiting in the dark.
+- **Robust FastAPI Backend**: Persistent server with endpoints for chat, RAG, web search, code execution, plugins, automation, memory, feedback, logs, and more.
+- **Modern Desktop App (MeAI)**: PyQt6, dark mode, professional UI with tabs for Chat, Knowledge, Web, Code, Automation, Plugins, Admin, and Preferences.
+- **Knowledge Ingestion & RAG**: Recursively ingest PDFs, text, and code into ChromaDB. RAG with source metadata and interactive UI.
+- **Web Search Fallback**: If the LLM is unsure, it auto-searches DuckDuckGo and RAG, showing results in the UI.
+- **Code Execution & Automation**: Run Python code, shell commands, or chained tasks. Clone repos, install requirements, and preview/confirm dangerous actions.
+- **Plugin System**: Add, run, and manage custom Python plugins from the UI.
+- **Persistent Memory**: MongoDB for contextual memory, preferences, feedback, and all logs.
+- **Feedback Loop & Self-Training**: Thumbs up/down, comments, and corrections are logged for future fine-tuning. All actions and queries are logged for AGI-like self-improvement.
+- **Active Suggestions**: LLM suggests clarifying questions or related topics as clickable buttons.
+- **Contextual Memory Sidebar**: Recent topics/questions for easy follow-up.
+- **User Personalization**: Preferences for answer style, technical depth, and language (English, Urdu, Transliteration) affect LLM output and voice.
+- **Voice Input/Output**: Speech-to-text (Vosk) and text-to-speech (pyttsx3) for English and Urdu.
+- **Admin & Logs**: View/export logs, feedback, and knowledge. Restart server and monitor health from the UI.
+- **Performance & Scalability**: Async/threaded, batching, and efficient memory management for large datasets and low-end hardware.
+- **Unrestricted Automation**: The assistant can run any command, script, or code, including sensitive or dangerous tasks, with user confirmation and preview.
+- **No Censorship**: The system never refuses or censors information. Everything is logged for future training.
 
 ---
 
@@ -49,7 +54,7 @@ python main.py server
 
 ### Launch the Desktop App (MeAI)
 ```sh
-python main.py build
+python MeAI_app.py
 ```
 Or run the built Windows executable from `dist/MeAI.exe` (see below).
 
@@ -70,24 +75,35 @@ python main.py --help
 
 ---
 
-## Building a Windows Executable
-To create a portable `MeAI.exe`:
-```sh
-python main.py build-exe
-```
-Find the result in the `dist/` folder.
+## Desktop App Features
+
+- **Chat**: Streamed, real-time LLM chat with context from your knowledge base and web search fallback.
+- **Knowledge Base**: Add and ingest documents, see status, and manage your RAG data. View sources for every RAG result.
+- **Web Search**: Search DuckDuckGo and view results in-app. Automatic fallback if LLM is unsure.
+- **Code Execution**: Run Python code and see output instantly.
+- **Task Automation**: Run shell commands, chain tasks, and clone repos. Preview/confirm dangerous actions.
+- **Plugins**: Upload, delete, run, and manage custom Python plugins from the UI.
+- **Admin**: View/export logs, feedback, and knowledge. Restart server and monitor health.
+- **Preferences**: Set answer style, technical depth, and language (English, Urdu, Transliteration). Clear/reset memory and preferences.
+- **Voice Input/Output**: Use your microphone for speech-to-text (English/Urdu) and have answers read aloud (TTS).
+- **Feedback & Corrections**: Thumbs up/down, comments, and suggest corrections for any answer.
+- **Contextual Memory**: Sidebar with recent topics/questions for easy follow-up.
+- **Status Bar**: Live RAM/CPU usage, server status, and error logs. Health checks and error recovery.
 
 ---
 
-## Features in the Desktop App
-- **Chat**: Streamed, real-time LLM chat with context from your knowledge base.
-- **Knowledge Base**: Add and ingest documents, see status, and manage your RAG data.
-- **Web Search**: Search DuckDuckGo and view results in-app.
-- **Code Execution**: Run Python code and see output instantly.
-- **Task Automation**: Run shell commands and see results.
-- **Cybersecurity Mode**: Checkbox in Chat tab for expert answers.
-- **Status Bar**: Live RAM/CPU usage, server status, and error logs.
-- **Error Dialogs**: See detailed logs if anything goes wrong.
+## Advanced Automation & AGI Features
+- **Task Chaining**: Run multiple commands/scripts in sequence, with preview and error handling.
+- **Repo Cloning**: Clone any git repo, optionally install requirements, and view logs.
+- **Unrestricted Automation**: Run any command, script, or code, including sensitive or dangerous tasks, with user confirmation and preview.
+- **Self-Training**: All actions, queries, and feedback are logged for future model improvement and AGI-like self-improvement.
+
+---
+
+## Logs, Feedback, and Export
+- **All actions, queries, and feedback are logged** for future fine-tuning.
+- **Export logs, feedback, and knowledge** from the Admin tab for training or analysis.
+- **Submit corrections** to improve future answers.
 
 ---
 
@@ -95,9 +111,9 @@ Find the result in the `dist/` folder.
 - **Streaming LLM**: No more timeouts—see the LLM "thinking" in real time.
 - **Async/Threaded Calls**: Fast, non-blocking, and stable.
 - **Prompt Truncation**: Fits long chats into the model's context window.
-- **Status Polling**: Always know if the server is busy or errored.
-- **Error Handling**: All errors are logged and shown in the UI.
-- **Persistent Memory**: MongoDB for storing key-value data.
+- **Status Polling & Health Checks**: Always know if the server is busy, errored, or unhealthy.
+- **Error Handling**: All errors are logged and shown in the UI, with recovery options.
+- **Persistent Memory**: MongoDB for storing key-value data, preferences, and feedback.
 - **No Cloud**: 100% local, private, and portable.
 
 ---
@@ -106,6 +122,8 @@ Find the result in the `dist/` folder.
 - **Server not responding?** Make sure you started the server: `python main.py server`.
 - **Model too slow?** Use a smaller GGUF model, or optimize your hardware/llama-cpp build.
 - **App crashes or errors?** Check `server_errors.log` and the error dialog for details.
+- **Health check failed?** Use the Admin tab to restart the server or view logs.
+- **Voice not working?** Ensure Vosk models are downloaded for your language, and pyttsx3 is installed.
 - **Need help?** Open an issue or contact Mesum Bin Shaukat.
 
 ---

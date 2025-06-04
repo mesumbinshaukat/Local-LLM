@@ -123,6 +123,8 @@ class MeAIApp(QMainWindow):
         self.init_web_tab()
         self.init_code_tab()
         self.init_task_tab()
+        self.init_plugins_tab()
+        self.init_admin_tab()
         self.init_preferences_tab()
         self.statusBar().showMessage(BRAND)
         self.status_timer = QTimer()
@@ -133,12 +135,35 @@ class MeAIApp(QMainWindow):
         try:
             resp = requests.get(f"{SERVER_URL}/status", timeout=2)
             status = resp.json()
-            msg = f"RAM: {status['ram_usage']}% | CPU: {status['cpu_usage']}% | Processing: {'Yes' if status['processing'] else 'No'}"
+            mem_resp = requests.get(f"{SERVER_URL}/memory/usage", timeout=2)
+            mem = mem_resp.json()
+            health_resp = requests.get(f"{SERVER_URL}/health", timeout=2)
+            health = health_resp.json()
+            msg = f"RAM: {mem['ram']}% | CPU: {mem['cpu']}% | Processing: {'Yes' if status['processing'] else 'No'}"
             if status.get('last_error'):
                 msg += f" | Last Error: {status['last_error']}"
+            if health.get('status') != 'ok':
+                msg += f" | [Health: ERROR]"
             self.statusBar().showMessage(f"{BRAND} | {msg}")
+            if health.get('status') != 'ok':
+                self.show_health_error(health)
         except Exception:
             self.statusBar().showMessage(f"{BRAND} | [Server Offline]")
+    def show_health_error(self, health):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("System Health Error")
+        msg.setText("Critical system health check failed!")
+        msg.setDetailedText(json.dumps(health, indent=2))
+        msg.setIcon(QMessageBox.Icon.Critical)
+        restart_btn = msg.addButton("Restart Server", QMessageBox.ButtonRole.ActionRole)
+        msg.addButton(QMessageBox.StandardButton.Close)
+        msg.exec()
+        if msg.clickedButton() == restart_btn:
+            self.restart_server_backend()
+    def show_progress(self, message):
+        self.statusBar().showMessage(message)
+    def hide_progress(self):
+        self.statusBar().showMessage(BRAND)
     def init_chat_tab(self):
         tab = QWidget()
         layout = QVBoxLayout()
@@ -197,6 +222,11 @@ class MeAIApp(QMainWindow):
         self.last_assistant_bubble_pos = None  # Reset for new response
         # Add preferences to the request
         prefs = self.preferences.copy()
+        # Log user action
+        try:
+            requests.post(f"{SERVER_URL}/log_action", json={"action": "chat_query", "query": user_input, "preferences": prefs})
+        except Exception:
+            pass
         self.streaming_worker = StreamingChatWorker(self.chat_history, user_input, cyber_mode=self.cyber_mode)
         self.streaming_worker.prefs = prefs
         self.streaming_worker.partial_signal.connect(self.display_partial_response)
@@ -414,26 +444,130 @@ class MeAIApp(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout()
         layout.addWidget(QLabel("<h2>Task Automation</h2>"))
-        self.task_input = QLineEdit()
-        self.task_input.setPlaceholderText("Enter a shell command to run...")
-        run_btn = QPushButton("Run Command")
-        run_btn.clicked.connect(self.run_task)
+        # Task chaining
+        self.chain_input = QTextEdit()
+        self.chain_input.setPlaceholderText("Enter one shell command per line for task chaining...")
+        chain_btn = QPushButton("Run Task Chain")
+        chain_btn.clicked.connect(self.run_task_chain)
+        preview_chain_btn = QPushButton("Preview Chain")
+        preview_chain_btn.clicked.connect(self.preview_task_chain)
+        # Repo cloning
+        self.repo_input = QLineEdit()
+        self.repo_input.setPlaceholderText("Enter git repo URL to clone...")
+        self.req_checkbox = QCheckBox("Install requirements.txt after clone")
+        clone_btn = QPushButton("Clone Repo")
+        clone_btn.clicked.connect(self.clone_repo)
+        preview_clone_btn = QPushButton("Preview Clone Action")
+        preview_clone_btn.clicked.connect(self.preview_clone_repo)
+        # Output/logs
         self.task_output = QTextEdit()
         self.task_output.setReadOnly(True)
-        layout.addWidget(self.task_input)
-        layout.addWidget(run_btn)
-        layout.addWidget(QLabel("<b>Output:</b>"))
+        logs_btn = QPushButton("View Automation Logs")
+        logs_btn.clicked.connect(self.view_automation_logs)
+        # Layout
+        layout.addWidget(QLabel("<b>Task Chain:</b>"))
+        layout.addWidget(self.chain_input)
+        hbox1 = QHBoxLayout()
+        hbox1.addWidget(chain_btn)
+        hbox1.addWidget(preview_chain_btn)
+        layout.addLayout(hbox1)
+        layout.addWidget(QLabel("<b>Repo Cloning:</b>"))
+        layout.addWidget(self.repo_input)
+        layout.addWidget(self.req_checkbox)
+        hbox2 = QHBoxLayout()
+        hbox2.addWidget(clone_btn)
+        hbox2.addWidget(preview_clone_btn)
+        layout.addLayout(hbox2)
+        layout.addWidget(QLabel("<b>Output/Logs:</b>"))
         layout.addWidget(self.task_output)
+        layout.addWidget(logs_btn)
         tab.setLayout(layout)
         self.tabs.addTab(tab, "Automation")
-    def run_task(self):
-        cmd = self.task_input.text().strip()
+    def run_task_chain(self):
+        cmds = [line.strip() for line in self.chain_input.toPlainText().splitlines() if line.strip()]
+        if not cmds:
+            self.task_output.setText("No commands entered.")
+            return
+        # Confirm dangerous actions
+        if any("rm " in c or "del " in c or "shutdown" in c for c in cmds):
+            ok = QMessageBox.question(self, "Dangerous Action", "This chain contains potentially dangerous commands. Proceed?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if ok != QMessageBox.StandardButton.Yes:
+                self.task_output.setText("Aborted by user.")
+                return
         try:
-            resp = requests.post(f"{SERVER_URL}/shell", json={"cmd": cmd})
+            resp = requests.post(f"{SERVER_URL}/automation/chain", json=cmds)
             if resp.status_code == 200:
-                self.task_output.setText(str(resp.json()["result"]))
+                results = resp.json().get("results", [])
+                out = ""
+                for r in results:
+                    out += f"$ {r['command']}\nStatus: {r['status']}\n{r['result']}\n---\n"
+                self.task_output.setText(out)
             else:
-                self.task_output.setText(str(resp.json()))
+                self.task_output.setText("Error: " + str(resp.text))
+        except Exception as e:
+            self.task_output.setText(f"Error: {e}")
+    def preview_task_chain(self):
+        cmds = [line.strip() for line in self.chain_input.toPlainText().splitlines() if line.strip()]
+        if not cmds:
+            self.task_output.setText("No commands entered.")
+            return
+        try:
+            resp = requests.post(f"{SERVER_URL}/automation/chain?preview=true", json=cmds)
+            if resp.status_code == 200:
+                preview = resp.json().get("preview", [])
+                self.task_output.setText("Preview of actions:\n" + "\n".join(preview))
+            else:
+                self.task_output.setText("Error: " + str(resp.text))
+        except Exception as e:
+            self.task_output.setText(f"Error: {e}")
+    def clone_repo(self):
+        url = self.repo_input.text().strip()
+        install_req = self.req_checkbox.isChecked()
+        if not url:
+            self.task_output.setText("No repo URL entered.")
+            return
+        # Confirm dangerous action
+        if install_req:
+            ok = QMessageBox.question(self, "Install Requirements", "Install requirements.txt after cloning? This may run arbitrary code.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if ok != QMessageBox.StandardButton.Yes:
+                self.task_output.setText("Aborted by user.")
+                return
+        try:
+            resp = requests.post(f"{SERVER_URL}/automation/clone_repo", json={"repo_url": url, "install_requirements": install_req})
+            if resp.status_code == 200:
+                result = resp.json().get("result", "")
+                req = resp.json().get("requirements", "")
+                self.task_output.setText(f"Clone result:\n{result}\nRequirements install:\n{req}")
+            else:
+                self.task_output.setText("Error: " + str(resp.text))
+        except Exception as e:
+            self.task_output.setText(f"Error: {e}")
+    def preview_clone_repo(self):
+        url = self.repo_input.text().strip()
+        install_req = self.req_checkbox.isChecked()
+        if not url:
+            self.task_output.setText("No repo URL entered.")
+            return
+        try:
+            resp = requests.post(f"{SERVER_URL}/automation/clone_repo?preview=true", json={"repo_url": url, "install_requirements": install_req})
+            if resp.status_code == 200:
+                preview = resp.json().get("preview", [])
+                self.task_output.setText("Preview of actions:\n" + "\n".join(preview))
+            else:
+                self.task_output.setText("Error: " + str(resp.text))
+        except Exception as e:
+            self.task_output.setText(f"Error: {e}")
+    def view_automation_logs(self):
+        try:
+            resp = requests.get(f"{SERVER_URL}/automation/logs")
+            if resp.status_code == 200:
+                logs = resp.json().get("logs", [])
+                out = ""
+                for entry in logs:
+                    out += f"[{entry['timestamp']}] {entry['action']}\nStatus: {entry['status']}\nResult: {entry['result']}\n---\n"
+                self.task_output.setText(out)
+            else:
+                self.task_output.setText("Error: " + str(resp.text))
         except Exception as e:
             self.task_output.setText(f"Error: {e}")
     def add_feedback_buttons(self, query, llm_answer, web_results, rag_results):
@@ -446,10 +580,12 @@ class MeAIApp(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
         up_btn = QPushButton("👍")
         down_btn = QPushButton("👎")
+        correction_btn = QPushButton("Suggest Correction")
         label = QLabel("Was this helpful?")
         layout.addWidget(label)
         layout.addWidget(up_btn)
         layout.addWidget(down_btn)
+        layout.addWidget(correction_btn)
         feedback_widget.setLayout(layout)
         self.chat_display.insertPlainText("\n")
         self.chat_display.setFocus()
@@ -478,11 +614,27 @@ class MeAIApp(QMainWindow):
                 self.statusBar().showMessage(f"Feedback error: {e}", 5000)
             up_btn.setEnabled(False)
             down_btn.setEnabled(False)
+            correction_btn.setEnabled(False)
             label.setText("Feedback received.")
+        def send_correction():
+            correction, ok = QInputDialog.getMultiLineText(self, "Suggest Correction", "Enter your correction or improved answer:")
+            if ok and correction.strip():
+                try:
+                    requests.post(f"{SERVER_URL}/feedback/correction", json={
+                        "query": query,
+                        "llm_answer": llm_answer,
+                        "correction": correction.strip(),
+                        "web_results": web_results,
+                        "rag_results": rag_results
+                    }, timeout=10)
+                    self.statusBar().showMessage("Correction submitted!", 5000)
+                except Exception as e:
+                    self.statusBar().showMessage(f"Correction error: {e}", 5000)
         up_btn.clicked.connect(lambda: send_feedback(True))
         down_btn.clicked.connect(lambda: send_feedback(False))
+        correction_btn.clicked.connect(send_correction)
         # Show in chat (simulate by appending a line)
-        self.chat_display.append("<div style='margin:8px;'><button>👍</button> <button>👎</button> <span style='color:#888'>Was this helpful?</span></div>")
+        self.chat_display.append("<div style='margin:8px;'><button>👍</button> <button>👎</button> <button>✏️</button> <span style='color:#888'>Was this helpful?</span></div>")
 
     def add_suggestion_buttons(self, suggestions):
         from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton
@@ -509,7 +661,6 @@ class MeAIApp(QMainWindow):
         self.chat_input.setFocus()
 
     def add_to_recent_topics(self, user_input, assistant_response):
-        # Add user question and assistant answer as a topic
         topic = user_input.strip()
         if topic and (not self.recent_topics or self.recent_topics[-1] != topic):
             self.recent_topics.append(topic)
@@ -518,18 +669,55 @@ class MeAIApp(QMainWindow):
             self.sidebar.clear()
             for t in reversed(self.recent_topics):
                 self.sidebar.addItem(QListWidgetItem(t))
+            self.save_recent_topics()
 
     def load_preferences(self):
         try:
-            with open("meai_prefs.json", "r") as f:
-                return json.load(f)
+            resp = requests.get(f"{SERVER_URL}/preferences")
+            if resp.status_code == 200:
+                return resp.json().get("preferences", {"answer_style": "concise", "tech_depth": "basic", "language": "English"})
         except Exception:
-            return {"answer_style": "concise", "tech_depth": "basic", "language": "English"}
+            pass
+        return {"answer_style": "concise", "tech_depth": "basic", "language": "English"}
 
     def save_preferences(self):
         try:
-            with open("meai_prefs.json", "w") as f:
-                json.dump(self.preferences, f)
+            requests.post(f"{SERVER_URL}/preferences", json={"preferences": self.preferences})
+        except Exception:
+            pass
+
+    def clear_preferences(self):
+        try:
+            requests.post(f"{SERVER_URL}/preferences/clear")
+            self.preferences = {"answer_style": "concise", "tech_depth": "basic", "language": "English"}
+            self.save_preferences()
+            self.statusBar().showMessage("Preferences cleared.", 3000)
+        except Exception:
+            pass
+
+    def sync_recent_topics(self):
+        try:
+            resp = requests.get(f"{SERVER_URL}/memory/recent_topics")
+            if resp.status_code == 200:
+                self.recent_topics = resp.json().get("topics", [])
+                self.sidebar.clear()
+                for t in reversed(self.recent_topics):
+                    self.sidebar.addItem(QListWidgetItem(t))
+        except Exception:
+            pass
+
+    def save_recent_topics(self):
+        try:
+            requests.post(f"{SERVER_URL}/memory/recent_topics", json={"topics": self.recent_topics})
+        except Exception:
+            pass
+
+    def clear_recent_topics(self):
+        try:
+            requests.post(f"{SERVER_URL}/memory/clear_recent_topics")
+            self.recent_topics = []
+            self.sidebar.clear()
+            self.statusBar().showMessage("Recent topics cleared.", 3000)
         except Exception:
             pass
 
@@ -554,10 +742,17 @@ class MeAIApp(QMainWindow):
         # Language
         layout.addWidget(QLabel("Language:"))
         self.lang_combo = QComboBox()
-        self.lang_combo.addItems(["English", "Other"])
+        self.lang_combo.addItems(["English", "Urdu", "Transliteration"])
         self.lang_combo.setCurrentText(self.preferences.get("language", "English"))
         self.lang_combo.currentTextChanged.connect(lambda v: self.set_pref("language", v))
         layout.addWidget(self.lang_combo)
+        # Clear buttons
+        clear_prefs_btn = QPushButton("Clear Preferences")
+        clear_prefs_btn.clicked.connect(self.clear_preferences)
+        clear_topics_btn = QPushButton("Clear Recent Topics")
+        clear_topics_btn.clicked.connect(self.clear_recent_topics)
+        layout.addWidget(clear_prefs_btn)
+        layout.addWidget(clear_topics_btn)
         tab.setLayout(layout)
         self.tabs.addTab(tab, "Preferences")
 
@@ -570,7 +765,15 @@ class MeAIApp(QMainWindow):
             QMessageBox.warning(self, "Voice Input", "Speech-to-text is not available. Please install vosk and pyaudio.")
             return
         try:
-            model = Model("vosk-model-small-en-us-0.15")  # Path to Vosk model
+            lang = self.preferences.get("language", "English")
+            if lang == "Urdu":
+                model_path = "vosk-model-small-ur-0.22"  # Path to Urdu model
+            else:
+                model_path = "vosk-model-small-en-us-0.15"  # Path to English model
+            if not os.path.exists(model_path):
+                QMessageBox.warning(self, "Voice Input", f"Vosk model not found: {model_path}")
+                return
+            model = Model(model_path)
             rec = KaldiRecognizer(model, 16000)
             p = pyaudio.PyAudio()
             stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=8000)
@@ -595,6 +798,8 @@ class MeAIApp(QMainWindow):
             p.terminate()
             self.loading_label.setText("")
             if result.strip():
+                if lang == "Transliteration":
+                    result = self.transliterate_to_urdu(result.strip())
                 self.chat_input.setText(result.strip())
                 self.send_chat()
             else:
@@ -602,7 +807,6 @@ class MeAIApp(QMainWindow):
         except Exception as e:
             self.loading_label.setText("")
             QMessageBox.critical(self, "Voice Input Error", str(e))
-
     def speak_last_answer(self):
         if not TTS_AVAILABLE:
             QMessageBox.warning(self, "Text-to-Speech", "pyttsx3 is not available. Please install pyttsx3.")
@@ -616,11 +820,199 @@ class MeAIApp(QMainWindow):
             if not last_answer:
                 QMessageBox.information(self, "Text-to-Speech", "No assistant answer to read.")
                 return
+            lang = self.preferences.get("language", "English")
             engine = pyttsx3.init()
+            voices = engine.getProperty('voices')
+            if lang == "Urdu":
+                # Try to select an Urdu voice if available
+                for v in voices:
+                    if "urdu" in v.name.lower() or "urdu" in v.languages:
+                        engine.setProperty('voice', v.id)
+                        break
+            elif lang == "Transliteration":
+                last_answer = self.transliterate_to_urdu(last_answer)
+            # Otherwise use default voice
             engine.say(last_answer)
             engine.runAndWait()
         except Exception as e:
             QMessageBox.critical(self, "Text-to-Speech Error", str(e))
+    def transliterate_to_urdu(self, text):
+        # Simple placeholder for transliteration logic
+        # In production, use a proper transliteration library
+        return text.replace('a', 'ا').replace('i', 'ی').replace('u', 'و').replace('e', 'ے').replace('o', 'و')
+
+    def init_plugins_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout()
+        self.plugin_list = QListWidget()
+        refresh_btn = QPushButton("Refresh Plugin List")
+        refresh_btn.clicked.connect(self.refresh_plugins)
+        upload_btn = QPushButton("Upload Plugin")
+        upload_btn.clicked.connect(self.upload_plugin)
+        delete_btn = QPushButton("Delete Selected Plugin")
+        delete_btn.clicked.connect(self.delete_plugin)
+        run_btn = QPushButton("Run Selected Plugin")
+        run_btn.clicked.connect(self.run_plugin)
+        self.plugin_output = QTextEdit()
+        self.plugin_output.setReadOnly(True)
+        layout.addWidget(QLabel("<h2>Plugin Management</h2>"))
+        layout.addWidget(self.plugin_list)
+        hbox = QHBoxLayout()
+        hbox.addWidget(refresh_btn)
+        hbox.addWidget(upload_btn)
+        hbox.addWidget(delete_btn)
+        hbox.addWidget(run_btn)
+        layout.addLayout(hbox)
+        layout.addWidget(QLabel("Output:"))
+        layout.addWidget(self.plugin_output)
+        tab.setLayout(layout)
+        self.tabs.addTab(tab, "Plugins")
+        self.refresh_plugins()
+
+    def refresh_plugins(self):
+        try:
+            resp = requests.get(f"{SERVER_URL}/plugins")
+            if resp.status_code == 200:
+                plugins = resp.json().get("plugins", [])
+                self.plugin_list.clear()
+                for p in plugins:
+                    self.plugin_list.addItem(p)
+            else:
+                self.plugin_output.setText("Error loading plugins: " + str(resp.text))
+        except Exception as e:
+            self.plugin_output.setText(f"Error: {e}")
+
+    def upload_plugin(self):
+        fname, _ = QFileDialog.getOpenFileName(self, "Select Python Plugin", "", "Python Files (*.py)")
+        if fname:
+            try:
+                with open(fname, "rb") as f:
+                    files = {"file": (os.path.basename(fname), f, "text/x-python")}
+                    resp = requests.post(f"{SERVER_URL}/plugin/upload", files=files)
+                if resp.status_code == 200:
+                    self.plugin_output.setText(f"Uploaded: {os.path.basename(fname)}")
+                    self.refresh_plugins()
+                else:
+                    self.plugin_output.setText("Upload failed: " + str(resp.text))
+            except Exception as e:
+                self.plugin_output.setText(f"Error: {e}")
+
+    def delete_plugin(self):
+        item = self.plugin_list.currentItem()
+        if item:
+            plugin = item.text()
+            try:
+                resp = requests.delete(f"{SERVER_URL}/plugin/delete/{plugin}")
+                if resp.status_code == 200:
+                    self.plugin_output.setText(f"Deleted: {plugin}")
+                    self.refresh_plugins()
+                else:
+                    self.plugin_output.setText("Delete failed: " + str(resp.text))
+            except Exception as e:
+                self.plugin_output.setText(f"Error: {e}")
+
+    def run_plugin(self):
+        item = self.plugin_list.currentItem()
+        if item:
+            plugin = item.text()
+            user_input, ok = QInputDialog.getText(self, "Run Plugin", "Input for plugin:")
+            if ok:
+                try:
+                    resp = requests.post(f"{SERVER_URL}/plugin/run", json={"plugin": plugin, "input": user_input})
+                    if resp.status_code == 200:
+                        out = resp.json().get("output", "")
+                        err = resp.json().get("error", "")
+                        self.plugin_output.setText(f"Output:\n{out}\nError:\n{err}")
+                    else:
+                        self.plugin_output.setText("Run failed: " + str(resp.text))
+                except Exception as e:
+                    self.plugin_output.setText(f"Error: {e}")
+
+    def init_admin_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout()
+        self.log_display = QTextEdit()
+        self.log_display.setReadOnly(True)
+        refresh_log_btn = QPushButton("Refresh Logs")
+        refresh_log_btn.clicked.connect(self.refresh_logs)
+        restart_btn = QPushButton("Restart Server")
+        restart_btn.clicked.connect(self.restart_server_backend)
+        export_logs_btn = QPushButton("Export Logs")
+        export_logs_btn.clicked.connect(self.export_logs)
+        export_feedback_btn = QPushButton("Export Feedback")
+        export_feedback_btn.clicked.connect(self.export_feedback)
+        export_knowledge_btn = QPushButton("Export Knowledge")
+        export_knowledge_btn.clicked.connect(self.export_knowledge)
+        layout.addWidget(QLabel("<h2>Admin Controls</h2>"))
+        layout.addWidget(self.log_display)
+        hbox = QHBoxLayout()
+        hbox.addWidget(refresh_log_btn)
+        hbox.addWidget(restart_btn)
+        hbox.addWidget(export_logs_btn)
+        hbox.addWidget(export_feedback_btn)
+        hbox.addWidget(export_knowledge_btn)
+        layout.addLayout(hbox)
+        tab.setLayout(layout)
+        self.tabs.addTab(tab, "Admin")
+        self.refresh_logs()
+
+    def refresh_logs(self):
+        try:
+            resp = requests.get(f"{SERVER_URL}/logs")
+            if resp.status_code == 200:
+                self.log_display.setText(resp.json().get("log", ""))
+            else:
+                self.log_display.setText("Error loading logs: " + str(resp.text))
+        except Exception as e:
+            self.log_display.setText(f"Error: {e}")
+
+    def restart_server_backend(self):
+        try:
+            resp = requests.post(f"{SERVER_URL}/restart")
+            if resp.status_code == 200:
+                QMessageBox.information(self, "Restart", "Server is restarting. Please wait a few seconds and reconnect.")
+            else:
+                QMessageBox.warning(self, "Restart Failed", str(resp.text))
+        except Exception as e:
+            QMessageBox.warning(self, "Restart Failed", str(e))
+
+    def export_logs(self):
+        try:
+            resp = requests.get(f"{SERVER_URL}/export/logs")
+            if resp.status_code == 200:
+                logs = resp.json()
+                out = ""
+                for fname, content in logs.items():
+                    out += f"--- {fname} ---\n{content}\n\n"
+                self.log_display.setText(out)
+            else:
+                self.log_display.setText("Error exporting logs: " + str(resp.text))
+        except Exception as e:
+            self.log_display.setText(f"Error: {e}")
+
+    def export_feedback(self):
+        try:
+            resp = requests.get(f"{SERVER_URL}/export/feedback")
+            if resp.status_code == 200:
+                feedbacks = resp.json().get("feedback", [])
+                out = json.dumps(feedbacks, indent=2, ensure_ascii=False)
+                self.log_display.setText(out)
+            else:
+                self.log_display.setText("Error exporting feedback: " + str(resp.text))
+        except Exception as e:
+            self.log_display.setText(f"Error: {e}")
+
+    def export_knowledge(self):
+        try:
+            resp = requests.get(f"{SERVER_URL}/export/knowledge")
+            if resp.status_code == 200:
+                knowledge = resp.json()
+                out = json.dumps(knowledge, indent=2, ensure_ascii=False)
+                self.log_display.setText(out)
+            else:
+                self.log_display.setText("Error exporting knowledge: " + str(resp.text))
+        except Exception as e:
+            self.log_display.setText(f"Error: {e}")
 
 def main():
     app = QApplication(sys.argv)
