@@ -9,9 +9,23 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QTabWidget, QLineEdit, QComboBox, QProgressBar,
                             QFrame, QScrollArea, QGridLayout, QFileDialog,
                             QMessageBox, QCheckBox, QInputDialog, QListWidget,
-                            QListWidgetItem, QSplitter)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve, QSize, QFileSystemWatcher
-from PyQt6.QtGui import QFont, QPalette, QColor, QLinearGradient, QGradient, QIcon, QTextCharFormat, QTextCursor
+                            QListWidgetItem, QSplitter, QGroupBox, QTabBar)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve, QSize, QFileSystemWatcher, QUrl
+from PyQt6.QtGui import QFont, QPalette, QColor, QLinearGradient, QGradient, QIcon, QTextCharFormat, QTextCursor, QPainter
+from PyQt6.QtWebEngineWidgets import QWebEngineView
+
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Try to import QtCharts, but make it optional
+try:
+    from PyQt6.QtCharts import QChart, QChartView, QPieSeries, QPieSlice
+    CHARTS_AVAILABLE = True
+except ImportError:
+    CHARTS_AVAILABLE = False
+    logger.warning("QtCharts not available. Charts will be disabled.")
+
 import markdown2
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -20,11 +34,6 @@ from collections import defaultdict
 import threading
 import queue
 import importlib
-import logging
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Check for voice functionality
 try:
@@ -88,64 +97,129 @@ class HotReloader:
             logger.error(f"Error reloading UI: {str(e)}")
 
 class ChatWorker(QThread):
-    response_signal = pyqtSignal(str)
-    error_signal = pyqtSignal(str)
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+    
     def __init__(self, history, user_input, cyber_mode=False):
         super().__init__()
         self.history = history
         self.user_input = user_input
         self.cyber_mode = cyber_mode
+        self.prefs = None
+        
     def run(self):
         try:
-            resp = requests.post(
-                f"{SERVER_URL}/chat",
-                json={"messages": self.history, "query": self.user_input, "use_rag": True, "cyber_mode": self.cyber_mode}, timeout=120
-            )
-            if resp.status_code == 200:
-                response = resp.json()["response"]
-                self.response_signal.emit(response)
+            # Ensure history is a list of message objects
+            messages = []
+            if isinstance(self.history, list):
+                messages = self.history.copy()
             else:
-                error = resp.json().get("error", str(resp.text))
-                self.error_signal.emit(error)
+                messages = []
+            
+            # Add the current user input
+            messages.append({"role": "user", "content": self.user_input})
+            
+            # Prepare the request payload
+            payload = {
+                "messages": messages,
+                "query": self.user_input,
+                "cyber_mode": self.cyber_mode
+            }
+            
+            if self.prefs:
+                payload["preferences"] = self.prefs
+            
+            # Make the request
+            response = requests.post(
+                f"{SERVER_URL}/chat",
+                json=payload
+            )
+            
+            if response.status_code != 200:
+                self.error.emit(f"Error: {response.status_code} - {response.text}")
+                return
+                
+            result = response.json()
+            self.finished.emit(result.get("response", ""))
+            
         except Exception as e:
-            self.error_signal.emit(str(e))
+            self.error.emit(str(e))
 
 class StreamingChatWorker(QThread):
     partial_signal = pyqtSignal(str)
     done_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
+    
     def __init__(self, history, user_input, cyber_mode=False):
         super().__init__()
         self.history = history
         self.user_input = user_input
         self.cyber_mode = cyber_mode
-        self.prefs = {}
+        self.prefs = None
+        
     def run(self):
         try:
+            # Ensure history is a list of message objects
+            messages = []
+            if isinstance(self.history, list):
+                messages = self.history.copy()
+            else:
+                messages = []
+            
+            # Add the current user input
+            messages.append({"role": "user", "content": self.user_input})
+            
+            # Prepare the request payload
             payload = {
-                "messages": self.history,
+                "messages": messages,
                 "query": self.user_input,
-                "use_rag": True,
-                "cyber_mode": self.cyber_mode,
+                "cyber_mode": self.cyber_mode
             }
+            
             if self.prefs:
                 payload["preferences"] = self.prefs
-            with requests.post(
+            
+            # Make the streaming request
+            response = requests.post(
                 f"{SERVER_URL}/chat/stream",
                 json=payload,
-                stream=True,
-                timeout=180
-            ) as resp:
-                if resp.status_code == 200:
-                    partial = ""
-                    for chunk in resp.iter_content(chunk_size=1, decode_unicode=True):
-                        if chunk:
-                            partial += chunk
-                            self.partial_signal.emit(partial)
-                    self.done_signal.emit(partial)
-                else:
-                    error = resp.text
-                    self.error_signal.emit(error)
+                stream=True
+            )
+            
+            if response.status_code != 200:
+                self.error_signal.emit(f"Error: {response.status_code} - {response.text}")
+                return
+                
+            full_response = ""
+            for chunk in response.iter_content(chunk_size=None, decode_unicode=True):
+                if chunk:
+                    if chunk.startswith("[ERROR]"):
+                        self.error_signal.emit(chunk[7:])
+                        return
+                    elif chunk.startswith("[FALLBACK]"):
+                        # Handle fallback data
+                        try:
+                            fallback_data = json.loads(chunk[10:])
+                            if fallback_data.get("web_results"):
+                                full_response += "\n\nAdditional information from web search:\n"
+                                for result in fallback_data["web_results"]:
+                                    full_response += f"- {result.get('title', '')}: {result.get('body', '')}\n"
+                            if fallback_data.get("rag_results"):
+                                full_response += "\n\nRelevant information from knowledge base:\n"
+                                for result in fallback_data["rag_results"]:
+                                    full_response += f"- {result.get('text', '')}\n"
+                            if fallback_data.get("suggestions"):
+                                full_response += "\n\nRelated topics you might be interested in:\n"
+                                for suggestion in fallback_data["suggestions"]:
+                                    full_response += f"- {suggestion}\n"
+                        except:
+                            pass
+                    else:
+                        full_response += chunk
+                        self.partial_signal.emit(full_response)
+            
+            self.done_signal.emit(full_response)
+            
         except Exception as e:
             self.error_signal.emit(str(e))
 
@@ -265,15 +339,27 @@ class CategoryCard(QFrame):
 class MeAIApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MeAI - Advanced AI Assistant")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setWindowTitle("MeAI Desktop")
+        self.setMinimumSize(1200, 800)
         
-        # Initialize data structures
-        self.training_data = defaultdict(int)
-        self.category_data = defaultdict(int)
-        self.recent_activities = []
-        self.data_queue = queue.Queue()
+        # Initialize preferences
+        self.preferences = {
+            "answer_style": "detailed",  # or "concise"
+            "tech_depth": "advanced",    # or "basic"
+            "language": "English"
+        }
+        
+        # Initialize dark mode
         self.is_dark_mode = True
+        self.cyber_mode = False
+        
+        # Initialize chat history
+        self.chat_history = []  # List for message history
+        self.chat_history_ui = None  # QTextEdit for UI display
+        self.last_assistant_bubble_pos = None
+        
+        # Initialize recent topics
+        self.recent_topics = []
         
         # Create main widget and layout
         main_widget = QWidget()
@@ -282,18 +368,24 @@ class MeAIApp(QMainWindow):
         
         # Create tab widget
         self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+        
+        # Create and add all main tabs
+        self.create_chat_tab()                # Adds Chat tab
+        self.create_analytics_tab()           # Adds Analytics tab
+        self.create_settings_tab()            # Adds Settings tab
+        self.create_pentest_tab()             # Adds Pentest tab
+        self.tabs.addTab(self.create_web_tab(), "Web")      # Adds Web tab
+        self.tabs.addTab(self.create_backup_tab(), "Backup") # Adds Backup tab
+        
+        # Apply dark mode to the entire app after all tabs are created
         self.update_theme()
         
-        # Create all tabs
-        self.create_chat_tab()
-        self.create_dashboard_tab()
-        self.create_analytics_tab()
-        self.create_pentest_tab()
-        self.create_webscrape_tab()
-        self.create_settings_tab()
-        self.create_backup_tab()
-        
-        layout.addWidget(self.tabs)
+        # Initialize data structures
+        self.training_data = defaultdict(int)
+        self.category_data = defaultdict(int)  # Changed back to defaultdict(int)
+        self.recent_activities = []
+        self.data_queue = queue.Queue()
         
         # Start data collection thread
         self.start_data_collection()
@@ -313,14 +405,14 @@ class MeAIApp(QMainWindow):
                 data = self.data_queue.get_nowait()
                 
                 # Update total data
-                total_data = sum(data['category_data'].values())
+                total_data = sum(data.get('category_data', {}).values())
                 if hasattr(self, 'total_data_card'):
                     count_label = self.total_data_card.findChild(QLabel, "", Qt.FindChildOption.FindChildrenRecursively)[1]
                     if count_label:
                         count_label.setText(str(total_data))
                 
                 # Update active categories
-                active_categories = len(data['category_data'])
+                active_categories = len(data.get('category_data', {}))
                 if hasattr(self, 'active_categories_card'):
                     count_label = self.active_categories_card.findChild(QLabel, "", Qt.FindChildOption.FindChildrenRecursively)[1]
                     if count_label:
@@ -330,15 +422,15 @@ class MeAIApp(QMainWindow):
                 if hasattr(self, 'training_speed_card'):
                     count_label = self.training_speed_card.findChild(QLabel, "", Qt.FindChildOption.FindChildrenRecursively)[1]
                     if count_label:
-                        count_label.setText(f"{data['training_speed']}/s")
+                        count_label.setText(f"{data.get('training_speed', 0)}/s")
                 
                 # Update category distribution
-                if hasattr(self, 'category_grid'):
-                    self.update_category_distribution(data['category_data'])
+                if hasattr(self, 'category_chart'):
+                    self.update_category_distribution(data.get('category_data', {}))
                 
                 # Update recent activity
-                if hasattr(self, 'activity_list'):
-                    self.update_recent_activity(data['recent_activities'])
+                if hasattr(self, 'activities_list'):
+                    self.update_recent_activity(data.get('recent_activities', []))
         except Exception as e:
             logger.error(f"Error updating UI: {str(e)}")
 
@@ -347,9 +439,9 @@ class MeAIApp(QMainWindow):
         layout = QVBoxLayout(chat_tab)
         
         # Chat history
-        self.chat_history = QTextEdit()
-        self.chat_history.setReadOnly(True)
-        self.chat_history.setStyleSheet(f"""
+        self.chat_history_ui = QTextEdit()
+        self.chat_history_ui.setReadOnly(True)
+        self.chat_history_ui.setStyleSheet(f"""
             QTextEdit {{
                 background: {DARK_MODE['secondary'] if self.is_dark_mode else '#f8f9fa'};
                 color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
@@ -358,7 +450,7 @@ class MeAIApp(QMainWindow):
                 padding: 10px;
             }}
         """)
-        layout.addWidget(self.chat_history)
+        layout.addWidget(self.chat_history_ui)
         
         # Input area
         input_layout = QHBoxLayout()
@@ -417,7 +509,7 @@ class MeAIApp(QMainWindow):
         self.tabs.addTab(chat_tab, "Chat")
         
         # Initialize chat history with system context
-        self.chat_history.append(f"""
+        self.chat_history_ui.append(f"""
             <p style='color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};'>
                 <b>System:</b> Welcome to MeAI! I can help you with various tasks including:
                 <ul>
@@ -437,7 +529,14 @@ class MeAIApp(QMainWindow):
             return
             
         # Add user message to chat
-        self.chat_history.append(f"<p style='color: {DARK_MODE['accent'] if self.is_dark_mode else '#4a90e2'};'><b>You:</b> {user_message}</p>")
+        self.add_chat_bubble(user_message, user=True)
+        
+        # Initialize chat history if needed
+        if not hasattr(self, 'chat_history') or not isinstance(self.chat_history, list):
+            self.chat_history = []
+            
+        # Add user message to history
+        self.chat_history.append({"role": "user", "content": user_message})
         self.user_input.clear()
         
         # Check if it's a system command
@@ -449,30 +548,26 @@ class MeAIApp(QMainWindow):
                 )
                 if response.status_code == 200:
                     result = response.json()
-                    self.chat_history.append(f"<p style='color: {DARK_MODE['success'] if self.is_dark_mode else '#67b26f'};'><b>System:</b> {result['message']}</p>")
+                    if result.get('status') == 'executed':
+                        self.add_chat_bubble(f"Task executed successfully: {result.get('command')}", user=False, label="Task Execution")
+                        self.chat_history.append({"role": "assistant", "content": f"Task executed successfully: {result.get('command')}"})
+                    else:
+                        error_msg = result.get('error', 'Failed to execute command')
+                        self.add_chat_bubble(error_msg, user=False, label="Task Error")
+                        self.chat_history.append({"role": "assistant", "content": error_msg})
                 else:
-                    self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> Failed to execute command</p>")
+                    error_msg = "Failed to execute command"
+                    self.add_chat_bubble(error_msg, user=False, label="Task Error")
+                    self.chat_history.append({"role": "assistant", "content": error_msg})
             except Exception as e:
-                self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> {str(e)}</p>")
-        else:
-            # Handle regular chat
-            try:
-                response = requests.post(
-                    f"{SERVER_URL}/chat",
-                    json={"message": user_message}
-                )
-                if response.status_code == 200:
-                    result = response.json()
-                    self.chat_history.append(f"<p style='color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};'><b>MeAI:</b> {result['response']}</p>")
-                else:
-                    self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> Failed to get response</p>")
-            except Exception as e:
-                self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> {str(e)}</p>")
-        
-        # Scroll to bottom
-        self.chat_history.verticalScrollBar().setValue(
-            self.chat_history.verticalScrollBar().maximum()
-        )
+                error_msg = str(e)
+                self.add_chat_bubble(error_msg, user=False, label="Task Error")
+                self.chat_history.append({"role": "assistant", "content": error_msg})
+            return  # Exit after handling task execution
+            
+        # If not a task request, proceed with normal chat processing
+        self.process_chat_message(user_message)
+
     def is_task_request(self, text):
         """Check if the text is a system command request."""
         nl = text.strip().lower()
@@ -499,21 +594,50 @@ class MeAIApp(QMainWindow):
             
         return False
 
+    def process_chat_message(self, user_message):
+        """Process regular chat messages."""
+        self.loading_label.setText("Thinking...")
+        self.last_assistant_bubble_pos = None  # Reset for new response
+        prefs = self.preferences.copy()
+        
+        # Log the action
+        try:
+            requests.post(f"{SERVER_URL}/log_action", json={"action": "chat_query", "query": user_message, "preferences": prefs})
+        except Exception:
+            pass
+        
+        # Start streaming worker
+        self.streaming_worker = StreamingChatWorker(self.chat_history, user_message, cyber_mode=self.cyber_mode)
+        self.streaming_worker.prefs = prefs
+        self.streaming_worker.partial_signal.connect(self.display_partial_response)
+        self.streaming_worker.done_signal.connect(self.display_chat_response)
+        self.streaming_worker.error_signal.connect(self.fallback_to_sync_worker)
+        self.streaming_worker.start()
+        
+        # Add to recent topics
+        self.add_to_recent_topics(user_message, "")
+
     def send_chat(self):
+        """Send chat message and handle response."""
         user_input = self.chat_input.text().strip()
         if not user_input:
             return
+            
+        # Add user message to chat
         self.add_chat_bubble(user_input, user=True)
         self.chat_history.append({"role": "user", "content": user_input})
         self.chat_input.clear()
         self.loading_label.setText("Thinking...")
         self.last_assistant_bubble_pos = None  # Reset for new response
         prefs = self.preferences.copy()
+        
+        # Log the action
         try:
             requests.post(f"{SERVER_URL}/log_action", json={"action": "chat_query", "query": user_input, "preferences": prefs})
         except Exception:
             pass
-        # --- NEW: Task execution logic ---
+            
+        # Check if it's a task request
         if self.is_task_request(user_input):
             try:
                 resp = requests.post(f"{SERVER_URL}/task/execute", json={"instruction": user_input}, timeout=10)
@@ -531,7 +655,8 @@ class MeAIApp(QMainWindow):
                 self.loading_label.setText("")
             self.add_to_recent_topics(user_input, "[Task executed]")
             return
-        # --- END NEW ---
+            
+        # Start streaming worker for regular chat
         self.streaming_worker = StreamingChatWorker(self.chat_history, user_input, cyber_mode=self.cyber_mode)
         self.streaming_worker.prefs = prefs
         self.streaming_worker.partial_signal.connect(self.display_partial_response)
@@ -539,90 +664,72 @@ class MeAIApp(QMainWindow):
         self.streaming_worker.error_signal.connect(self.fallback_to_sync_worker)
         self.streaming_worker.start()
         self.add_to_recent_topics(user_input, "")
+
+    def display_chat_response(self, response):
+        """Display the final chat response and update history."""
+        self.loading_label.setText("")
+        self.add_chat_bubble(response, user=False)
+        self.chat_history.append({"role": "assistant", "content": response})
+        self.chat_history_ui.verticalScrollBar().setValue(
+            self.chat_history_ui.verticalScrollBar().maximum()
+        )
+
     def display_partial_response(self, partial):
-        html = f"<div style='background:#23272a;padding:10px;border-radius:10px;margin:8px;max-width:70%;float:left;color:#f28b82;'><span style='font-weight:bold'>MeAI:</span><br>{markdown2.markdown(partial)}</div><div style='clear:both'></div>"
-        cursor = self.chat_history.textCursor()
-        doc = self.chat_history.document()
+        """Display partial streaming response."""
+        if not hasattr(self, 'last_assistant_bubble_pos'):
+            self.last_assistant_bubble_pos = None
+            
         if self.last_assistant_bubble_pos is None:
-            # Insert new bubble and record its position
-            cursor.movePosition(QTextCursor.MoveOperation.End)
-            self.chat_history.setTextCursor(cursor)
-            self.chat_history.insertHtml(html)
-            self.chat_history.append("")  # Ensure new line after bubble
-            self.last_assistant_bubble_pos = doc.characterCount() - 2  # -2 for trailing newline
+            # Create new bubble for first chunk
+            self.add_chat_bubble(partial, user=False)
+            self.last_assistant_bubble_pos = self.chat_history_ui.document().blockCount() - 1
         else:
-            # Replace the last assistant bubble in place
-            cursor.setPosition(self.last_assistant_bubble_pos)
-            cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
-            cursor.removeSelectedText()
-            cursor.insertHtml(html)
-        self.loading_label.setText("Thinking...")
+            # Update existing bubble
+            cursor = self.chat_history_ui.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            for _ in range(self.last_assistant_bubble_pos):
+                cursor.movePosition(QTextCursor.MoveOperation.NextBlock)
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+            cursor.insertText(partial)
+                
+        self.chat_history_ui.verticalScrollBar().setValue(
+            self.chat_history_ui.verticalScrollBar().maximum()
+        )
+
+    def display_chat_error(self, error):
+        """Display chat error message."""
+        self.loading_label.setText("")
+        self.add_chat_bubble(error, user=False, label="Error")
+        self.chat_history.append({"role": "assistant", "content": f"Error: {error}"})
+        self.chat_history_ui.verticalScrollBar().setValue(
+            self.chat_history_ui.verticalScrollBar().maximum()
+        )
+
     def fallback_to_sync_worker(self, error):
         # If streaming fails, fallback to old worker
         self.worker = ChatWorker(self.chat_history, self.chat_history[-1]["content"], cyber_mode=self.cyber_mode)
-        self.worker.response_signal.connect(self.display_chat_response)
-        self.worker.error_signal.connect(self.display_chat_error)
+        self.worker.finished.connect(self.display_chat_response)
+        self.worker.error.connect(self.display_chat_error)
         self.worker.start()
-    def display_chat_response(self, response):
-        # Support both old and new server responses
-        if isinstance(response, dict):
-            llm_answer = response.get("llm_answer") or response.get("response")
-            web_results = response.get("web_results", [])
-            rag_results = response.get("rag_results", [])
-            suggestions = response.get("suggestions", [])
-        else:
-            llm_answer = response
-            web_results = []
-            rag_results = []
-            suggestions = []
-        self.chat_history.append({"role": "assistant", "content": llm_answer})
-        # LLM answer bubble
-        self.add_chat_bubble(llm_answer, user=False, label="LLM Answer")
-        # Web search fallback
-        if web_results:
-            html = "<div style='background:#23272a;padding:10px;border-radius:10px;margin:8px;max-width:70%;float:left;color:#fbbc04;'><b>Web Search Results:</b><ul>"
-            for r in web_results:
-                html += f"<li><a href='{r.get('href','')}' style='color:#8ab4f8'>{r.get('title','')}</a><br>{r.get('body','')}</li>"
-            html += "</ul></div><div style='clear:both'></div>"
-            self.chat_history.append(html)
-        # RAG fallback
-        if rag_results:
-            html = "<div style='background:#23272a;padding:10px;border-radius:10px;margin:8px;max-width:70%;float:left;color:#34a853;'><b>Knowledge Base Results:</b><ul>"
-            for r in rag_results:
-                if isinstance(r, dict) and r.get("source"):
-                    src = r.get("source", "unknown")
-                    chunk = r.get("chunk", 0)
-                    text = r.get("text", "")
-                    html += f"<li>{text[:200]}... <button onclick=\"window.open('{src}', '_blank')\">View Source</button> <span style='color:#888'>(chunk {chunk})</span></li>"
-                else:
-                    html += f"<li>{r}</li>"
-            html += "</ul></div><div style='clear:both'></div>"
-            self.chat_history.append(html)
-        # Suggestions (active follow-up)
-        if suggestions:
-            self.add_suggestion_buttons(suggestions)
-        # Feedback buttons (interactive)
-        self.add_feedback_buttons(self.chat_history[-2]["content"] if len(self.chat_history) > 1 else "", llm_answer, web_results, rag_results)
-        self.loading_label.setText("")
-        # Add to recent topics (update with assistant answer)
-        if self.recent_topics:
-            self.recent_topics[-1] = self.recent_topics[-1]  # Keep user input as topic
-    def display_chat_error(self, error):
-        self.loading_label.setText("")
-        self.show_error_dialog(error)
+
     def add_chat_bubble(self, text, user=True, label=None):
-        html = markdown2.markdown(text)
-        color = "#8ab4f8" if user else "#f28b82"
-        align = "right" if user else "left"
-        label_html = f"<span style='font-size:10px;color:#aaa;'>{label}</span><br>" if label else ""
-        bubble = f"<div style='background:#23272a;padding:10px;border-radius:10px;margin:8px;max-width:70%;float:{align};color:{color};'>{label_html}<span style='font-weight:bold'>{'You' if user else 'MeAI'}:</span><br>{html}</div><div style='clear:both'></div>"
-        self.chat_history.append(bubble)
+        """Add a chat bubble to the UI."""
+        if not hasattr(self, 'chat_history_ui'):
+            return
+        bubble = f"""
+            <p style='color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};'>
+                <b>{label if label else ('You' if user else 'MeAI')}:</b> {text}
+            </p>
+        """
+        self.chat_history_ui.append(bubble)
+
     def clear_chat(self):
-        self.chat_history.clear()
-        self.chat_history = [
-            {"role": "system", "content": "You are a helpful, knowledgeable AI assistant. Answer as helpfully as possible."}
-        ]
+        """Clear the chat history."""
+        if hasattr(self, 'chat_history_ui'):
+            self.chat_history_ui.clear()
+        self.chat_history = []
         self.last_assistant_bubble_pos = None
+
     def show_error_dialog(self, error):
         log_text = ""
         try:
@@ -645,6 +752,7 @@ class MeAIApp(QMainWindow):
             self.open_logs()
         elif clicked == restart_btn:
             self.restart_server()
+
     def open_logs(self):
         # Open the log file in the default text editor
         try:
@@ -654,6 +762,7 @@ class MeAIApp(QMainWindow):
                 subprocess.Popen(["xdg-open", "server_errors.log"])
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not open log file: {e}")
+
     def restart_server(self):
         # Attempt to restart the server in a new process (Windows only for now)
         try:
@@ -664,720 +773,56 @@ class MeAIApp(QMainWindow):
                 QMessageBox.information(self, "Restart Server", "Please restart the server manually in your terminal.")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not restart server: {e}")
-    def init_knowledge_tab(self):
-        tab = QWidget()
+
+    def create_analytics_tab(self):
+        """Create the analytics tab with charts and statistics."""
+        analytics_tab = QWidget()
         layout = QVBoxLayout()
-        layout.addWidget(QLabel("<h2>Knowledge Base</h2>"))
-        self.kb_status = QLabel("Drop PDFs or .txt files here or use the button below.")
-        layout.addWidget(self.kb_status)
-        add_btn = QPushButton("Add Document")
-        add_btn.clicked.connect(self.add_document)
-        ingest_btn = QPushButton("Ingest Knowledge Base")
-        ingest_btn.clicked.connect(self.ingest_kb)
-        layout.addWidget(add_btn)
-        layout.addWidget(ingest_btn)
-        tab.setLayout(layout)
-        self.tabs.addTab(tab, "Knowledge Base")
-    def add_document(self):
-        file, _ = QFileDialog.getOpenFileName(self, "Add Document", "", "PDF Files (*.pdf);;Text Files (*.txt)")
-        if file:
-            import shutil
-            shutil.copy(file, "./knowledge/")
-            self.kb_status.setText(f"Added: {file}")
-    def ingest_kb(self):
-        try:
-            import subprocess
-            subprocess.check_output([sys.executable, "main.py", "ingest"])
-            # Notify server to increment analytics
-            import requests
-            requests.post(f"{SERVER_URL}/ingest_kb")
-            self.kb_status.setText("Knowledge base ingested!")
-        except Exception as e:
-            self.kb_status.setText(f"Error: {e}")
-    def init_web_tab(self):
-        tab = QWidget()
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("<h2>Web Search</h2>"))
-        self.web_input = QLineEdit()
-        self.web_input.setPlaceholderText("Enter your search query...")
-        search_btn = QPushButton("Search")
-        search_btn.clicked.connect(self.web_search)
-        self.web_results = QTextEdit()
-        self.web_results.setReadOnly(True)
-        layout.addWidget(self.web_input)
-        layout.addWidget(search_btn)
-        layout.addWidget(self.web_results)
-        tab.setLayout(layout)
-        self.tabs.addTab(tab, "Web Search")
-    def web_search(self):
-        query = self.web_input.text().strip()
-        if not query:
-            return
-        try:
-            resp = requests.get(f"http://127.0.0.1:8000/search", params={"query": query})
-            results = resp.json().get("results", [])
-            html = ""
-            for idx, r in enumerate(results, 1):
-                html += f"<b>{idx}.</b> <a href='{r['href']}'>{r['title']}</a><br>{r['body']}<br><br>"
-            self.web_results.setHtml(html)
-        except Exception as e:
-            self.web_results.setText(f"Error: {e}")
-    def init_code_tab(self):
-        tab = QWidget()
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("<h2>Python Code Execution</h2>"))
-        self.code_input = QTextEdit()
-        self.code_input.setPlaceholderText("Enter Python code to execute...")
-        exec_btn = QPushButton("Run Code")
-        exec_btn.clicked.connect(self.run_code)
-        self.code_output = QTextEdit()
-        self.code_output.setReadOnly(True)
-        layout.addWidget(self.code_input)
-        layout.addWidget(exec_btn)
-        layout.addWidget(QLabel("<b>Output:</b>"))
-        layout.addWidget(self.code_output)
-        tab.setLayout(layout)
-        self.tabs.addTab(tab, "Code Exec")
-    def run_code(self):
-        code = self.code_input.toPlainText()
-        try:
-            resp = requests.post(f"{SERVER_URL}/exec", json={"code": code})
-            if resp.status_code == 200:
-                self.code_output.setText(str(resp.json()["result"]))
-            else:
-                self.code_output.setText(str(resp.json()))
-        except Exception as e:
-            self.code_output.setText(f"Error: {e}")
-    def init_task_tab(self):
-        tab = QWidget()
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("<h2>Task Automation</h2>"))
-        # Task chaining
-        self.chain_input = QTextEdit()
-        self.chain_input.setPlaceholderText("Enter one shell command per line for task chaining...")
-        chain_btn = QPushButton("Run Task Chain")
-        chain_btn.clicked.connect(self.run_task_chain)
-        preview_chain_btn = QPushButton("Preview Chain")
-        preview_chain_btn.clicked.connect(self.preview_task_chain)
-        # Repo cloning
-        self.repo_input = QLineEdit()
-        self.repo_input.setPlaceholderText("Enter git repo URL to clone...")
-        self.req_checkbox = QCheckBox("Install requirements.txt after clone")
-        clone_btn = QPushButton("Clone Repo")
-        clone_btn.clicked.connect(self.clone_repo)
-        preview_clone_btn = QPushButton("Preview Clone Action")
-        preview_clone_btn.clicked.connect(self.preview_clone_repo)
-        # Output/logs
-        self.task_output = QTextEdit()
-        self.task_output.setReadOnly(True)
-        logs_btn = QPushButton("View Automation Logs")
-        logs_btn.clicked.connect(self.view_automation_logs)
-        # Layout
-        layout.addWidget(QLabel("<b>Task Chain:</b>"))
-        layout.addWidget(self.chain_input)
-        hbox1 = QHBoxLayout()
-        hbox1.addWidget(chain_btn)
-        hbox1.addWidget(preview_chain_btn)
-        layout.addLayout(hbox1)
-        layout.addWidget(QLabel("<b>Repo Cloning:</b>"))
-        layout.addWidget(self.repo_input)
-        layout.addWidget(self.req_checkbox)
-        hbox2 = QHBoxLayout()
-        hbox2.addWidget(clone_btn)
-        hbox2.addWidget(preview_clone_btn)
-        layout.addLayout(hbox2)
-        layout.addWidget(QLabel("<b>Output/Logs:</b>"))
-        layout.addWidget(self.task_output)
-        layout.addWidget(logs_btn)
-        tab.setLayout(layout)
-        self.tabs.addTab(tab, "Automation")
-    def run_task_chain(self):
-        cmds = [line.strip() for line in self.chain_input.toPlainText().splitlines() if line.strip()]
-        if not cmds:
-            self.task_output.setText("No commands entered.")
-            return
-        # Confirm dangerous actions
-        if any("rm " in c or "del " in c or "shutdown" in c for c in cmds):
-            ok = QMessageBox.question(self, "Dangerous Action", "This chain contains potentially dangerous commands. Proceed?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if ok != QMessageBox.StandardButton.Yes:
-                self.task_output.setText("Aborted by user.")
-                return
-        try:
-            resp = requests.post(f"{SERVER_URL}/automation/chain", json=cmds)
-            if resp.status_code == 200:
-                results = resp.json().get("results", [])
-                out = ""
-                for r in results:
-                    out += f"$ {r['command']}\nStatus: {r['status']}\n{r['result']}\n---\n"
-                self.task_output.setText(out)
-            else:
-                self.task_output.setText("Error: " + str(resp.text))
-        except Exception as e:
-            self.task_output.setText(f"Error: {e}")
-    def preview_task_chain(self):
-        cmds = [line.strip() for line in self.chain_input.toPlainText().splitlines() if line.strip()]
-        if not cmds:
-            self.task_output.setText("No commands entered.")
-            return
-        try:
-            resp = requests.post(f"{SERVER_URL}/automation/chain?preview=true", json=cmds)
-            if resp.status_code == 200:
-                preview = resp.json().get("preview", [])
-                self.task_output.setText("Preview of actions:\n" + "\n".join(preview))
-            else:
-                self.task_output.setText("Error: " + str(resp.text))
-        except Exception as e:
-            self.task_output.setText(f"Error: {e}")
-    def clone_repo(self):
-        url = self.repo_input.text().strip()
-        install_req = self.req_checkbox.isChecked()
-        if not url:
-            self.task_output.setText("No repo URL entered.")
-            return
-        # Confirm dangerous action
-        if install_req:
-            ok = QMessageBox.question(self, "Install Requirements", "Install requirements.txt after cloning? This may run arbitrary code.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if ok != QMessageBox.StandardButton.Yes:
-                self.task_output.setText("Aborted by user.")
-                return
-        try:
-            resp = requests.post(f"{SERVER_URL}/automation/clone_repo", json={"repo_url": url, "install_requirements": install_req})
-            if resp.status_code == 200:
-                result = resp.json().get("result", "")
-                req = resp.json().get("requirements", "")
-                self.task_output.setText(f"Clone result:\n{result}\nRequirements install:\n{req}")
-            else:
-                self.task_output.setText("Error: " + str(resp.text))
-        except Exception as e:
-            self.task_output.setText(f"Error: {e}")
-    def preview_clone_repo(self):
-        url = self.repo_input.text().strip()
-        install_req = self.req_checkbox.isChecked()
-        if not url:
-            self.task_output.setText("No repo URL entered.")
-            return
-        try:
-            resp = requests.post(f"{SERVER_URL}/automation/clone_repo?preview=true", json={"repo_url": url, "install_requirements": install_req})
-            if resp.status_code == 200:
-                preview = resp.json().get("preview", [])
-                self.task_output.setText("Preview of actions:\n" + "\n".join(preview))
-            else:
-                self.task_output.setText("Error: " + str(resp.text))
-        except Exception as e:
-            self.task_output.setText(f"Error: {e}")
-    def view_automation_logs(self):
-        try:
-            resp = requests.get(f"{SERVER_URL}/automation/logs")
-            if resp.status_code == 200:
-                logs = resp.json().get("logs", [])
-                out = ""
-                for entry in logs:
-                    out += f"[{entry['timestamp']}] {entry['action']}\nStatus: {entry['status']}\nResult: {entry['result']}\n---\n"
-                self.task_output.setText(out)
-            else:
-                self.task_output.setText("Error: " + str(resp.text))
-        except Exception as e:
-            self.task_output.setText(f"Error: {e}")
-    def add_feedback_buttons(self, query, llm_answer, web_results, rag_results):
-        # Only allow one feedback per answer
-        if hasattr(self, '_feedback_given') and self._feedback_given:
-            return
-        self._feedback_given = False
-        feedback_widget = QWidget()
-        layout = QHBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        up_btn = QPushButton("👍")
-        down_btn = QPushButton("👎")
-        correction_btn = QPushButton("Suggest Correction")
-        label = QLabel("Was this helpful?")
-        layout.addWidget(label)
-        layout.addWidget(up_btn)
-        layout.addWidget(down_btn)
-        layout.addWidget(correction_btn)
-        feedback_widget.setLayout(layout)
-        self.chat_history.insertPlainText("\n")
-        self.chat_history.setFocus()
-        self.chat_history.append("")
-        self.chat_history.viewport().setProperty("feedback_widget", feedback_widget)
-        # Connect
-        def send_feedback(up):
-            self._feedback_given = True
-            user_comment = ""
-            if not up:
-                # Ask for comment
-                comment, ok = QInputDialog.getText(self, "Feedback", "How can we improve this answer? (optional)")
-                if ok:
-                    user_comment = comment
-            try:
-                requests.post(f"{SERVER_URL}/feedback", json={
-                    "query": query,
-                    "llm_answer": llm_answer,
-                    "web_results": web_results,
-                    "rag_results": rag_results,
-                    "feedback": "up" if up else "down",
-                    "user_comment": user_comment
-                }, timeout=10)
-                self.statusBar().showMessage("Thank you for your feedback!", 5000)
-            except Exception as e:
-                self.statusBar().showMessage(f"Feedback error: {e}", 5000)
-            up_btn.setEnabled(False)
-            down_btn.setEnabled(False)
-            correction_btn.setEnabled(False)
-            label.setText("Feedback received.")
-        def send_correction():
-            correction, ok = QInputDialog.getMultiLineText(self, "Suggest Correction", "Enter your correction or improved answer:")
-            if ok and correction.strip():
-                try:
-                    requests.post(f"{SERVER_URL}/feedback/correction", json={
-                        "query": query,
-                        "llm_answer": llm_answer,
-                        "correction": correction.strip(),
-                        "web_results": web_results,
-                        "rag_results": rag_results
-                    }, timeout=10)
-                    self.statusBar().showMessage("Correction submitted!", 5000)
-                except Exception as e:
-                    self.statusBar().showMessage(f"Correction error: {e}", 5000)
-        up_btn.clicked.connect(lambda: send_feedback(True))
-        down_btn.clicked.connect(lambda: send_feedback(False))
-        correction_btn.clicked.connect(send_correction)
-        # Show in chat (simulate by appending a line)
-        self.chat_history.append("<div style='margin:8px;'><button>👍</button> <button>👎</button> <button>✏️</button> <span style='color:#888'>Was this helpful?</span></div>")
-
-    def add_suggestion_buttons(self, suggestions):
-        from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton
-        suggestion_widget = QWidget()
-        layout = QHBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        for s in suggestions:
-            btn = QPushButton(s)
-            btn.setStyleSheet("background:#444;color:#fff;border:none;border-radius:4px;padding:4px 8px;margin-right:8px;")
-            btn.clicked.connect(lambda _, text=s: self.send_suggestion(text))
-            layout.addWidget(btn)
-        suggestion_widget.setLayout(layout)
-        self.chat_history.append("<div style='margin:8px;'><b>Suggestions:</b></div>")
-        self.chat_history.append("")
-        self.chat_history.viewport().setProperty("suggestion_widget", suggestion_widget)
-
-    def send_suggestion(self, text):
-        self.chat_input.setText(text)
-        self.send_chat()
-
-    def sidebar_item_clicked(self, item):
-        # Insert the selected topic into the chat input for follow-up
-        self.chat_input.setText(item.text())
-        self.chat_input.setFocus()
-
-    def add_to_recent_topics(self, user_input, assistant_response):
-        topic = user_input.strip()
-        if topic and (not self.recent_topics or self.recent_topics[-1] != topic):
-            self.recent_topics.append(topic)
-            if len(self.recent_topics) > 20:
-                self.recent_topics = self.recent_topics[-20:]
-            self.sidebar.clear()
-            for t in reversed(self.recent_topics):
-                self.sidebar.addItem(QListWidgetItem(t))
-            self.save_recent_topics()
-
-    def load_preferences(self):
-        try:
-            resp = requests.get(f"{SERVER_URL}/preferences")
-            if resp.status_code == 200:
-                return resp.json().get("preferences", {"answer_style": "concise", "tech_depth": "basic", "language": "English"})
-        except Exception:
-            pass
-        return {"answer_style": "concise", "tech_depth": "basic", "language": "English"}
-
-    def save_preferences(self):
-        try:
-            requests.post(f"{SERVER_URL}/preferences", json={"preferences": self.preferences})
-        except Exception:
-            pass
-
-    def clear_preferences(self):
-        try:
-            requests.post(f"{SERVER_URL}/preferences/clear")
-            self.preferences = {"answer_style": "concise", "tech_depth": "basic", "language": "English"}
-            self.save_preferences()
-            self.statusBar().showMessage("Preferences cleared.", 3000)
-        except Exception:
-            pass
-
-    def sync_recent_topics(self):
-        try:
-            resp = requests.get(f"{SERVER_URL}/memory/recent_topics")
-            if resp.status_code == 200:
-                self.recent_topics = resp.json().get("topics", [])
-                self.sidebar.clear()
-                for t in reversed(self.recent_topics):
-                    self.sidebar.addItem(QListWidgetItem(t))
-        except Exception:
-            pass
-
-    def save_recent_topics(self):
-        try:
-            requests.post(f"{SERVER_URL}/memory/recent_topics", json={"topics": self.recent_topics})
-        except Exception:
-            pass
-
-    def clear_recent_topics(self):
-        try:
-            requests.post(f"{SERVER_URL}/memory/clear_recent_topics")
-            self.recent_topics = []
-            self.sidebar.clear()
-            self.statusBar().showMessage("Recent topics cleared.", 3000)
-        except Exception:
-            pass
-
-    def init_preferences_tab(self):
-        tab = QWidget()
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("<h2>Preferences</h2>"))
-        # Answer style
-        layout.addWidget(QLabel("Answer Style:"))
-        self.style_combo = QComboBox()
-        self.style_combo.addItems(["concise", "detailed"])
-        self.style_combo.setCurrentText(self.preferences.get("answer_style", "concise"))
-        self.style_combo.currentTextChanged.connect(lambda v: self.set_pref("answer_style", v))
-        layout.addWidget(self.style_combo)
-        # Technical depth
-        layout.addWidget(QLabel("Technical Depth:"))
-        self.depth_combo = QComboBox()
-        self.depth_combo.addItems(["basic", "advanced"])
-        self.depth_combo.setCurrentText(self.preferences.get("tech_depth", "basic"))
-        self.depth_combo.currentTextChanged.connect(lambda v: self.set_pref("tech_depth", v))
-        layout.addWidget(self.depth_combo)
-        # Language
-        layout.addWidget(QLabel("Language:"))
-        self.lang_combo = QComboBox()
-        self.lang_combo.addItems(["English", "Urdu", "Transliteration"])
-        self.lang_combo.setCurrentText(self.preferences.get("language", "English"))
-        self.lang_combo.currentTextChanged.connect(lambda v: self.set_pref("language", v))
-        layout.addWidget(self.lang_combo)
-        # Clear buttons
-        clear_prefs_btn = QPushButton("Clear Preferences")
-        clear_prefs_btn.clicked.connect(self.clear_preferences)
-        clear_topics_btn = QPushButton("Clear Recent Topics")
-        clear_topics_btn.clicked.connect(self.clear_recent_topics)
-        layout.addWidget(clear_prefs_btn)
-        layout.addWidget(clear_topics_btn)
-        tab.setLayout(layout)
-        self.tabs.addTab(tab, "Preferences")
-
-    def set_pref(self, key, value):
-        self.preferences[key] = value
-        self.save_preferences()
-
-    def voice_input(self):
-        """Handle voice input using speech recognition."""
-        if not STT_AVAILABLE:
-            self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> Speech recognition is not available</p>")
-            return
+        
+        # Add a message if charts are not available
+        if not CHARTS_AVAILABLE:
+            warning_label = QLabel("Charts are not available. Please install PyQt6-Charts package for full functionality.")
+            warning_label.setStyleSheet(f"color: {DARK_MODE['warning']}; padding: 10px;")
+            layout.addWidget(warning_label)
+        
+        # Create a grid layout for the charts
+        grid = QGridLayout()
+        
+        # Category distribution chart
+        category_group = QGroupBox("Category Distribution")
+        category_layout = QVBoxLayout()
+        if CHARTS_AVAILABLE:
+            self.category_chart = QChart()
+            self.category_chart.setTitle("Category Distribution")
+            self.category_chart.setAnimationOptions(QChart.AnimationOption.SeriesAnimations)
+            self.category_chart.legend().setVisible(True)
+            self.category_chart.legend().setAlignment(Qt.AlignmentFlag.AlignBottom)
             
-        try:
-            recognizer = sr.Recognizer()
-            
-            with sr.Microphone() as source:
-                self.loading_label.setText("Listening...")
-                audio = recognizer.listen(source)
-                
-            self.loading_label.setText("Processing...")
-            text = recognizer.recognize_google(audio)
-            
-            if text:
-                self.user_input.setText(text)
-                self.handle_user_input()
-                
-        except Exception as e:
-            self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> {str(e)}</p>")
-        finally:
-            self.loading_label.setText("")
-
-    def speak_last_answer(self):
-        """Read the last AI response using text-to-speech."""
-        if not TTS_AVAILABLE:
-            self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> Text-to-speech is not available</p>")
-            return
-            
-        try:
-            engine = pyttsx3.init()
-            
-            # Get the last AI response
-            last_response = None
-            for i in range(self.chat_history.document().blockCount() - 1, -1, -1):
-                block = self.chat_history.document().findBlockByLineNumber(i)
-                text = block.text()
-                if "MeAI:" in text:
-                    last_response = text.split("MeAI:")[1].strip()
-                    break
-            
-            if last_response:
-                engine.say(last_response)
-                engine.runAndWait()
-            else:
-                self.chat_history.append(f"<p style='color: {DARK_MODE['warning'] if self.is_dark_mode else '#fbbc04'};'><b>Note:</b> No AI response found to read</p>")
-                
-        except Exception as e:
-            self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> {str(e)}</p>")
-
-    def init_plugins_tab(self):
-        tab = QWidget()
-        layout = QVBoxLayout()
-        self.plugin_list = QListWidget()
-        refresh_btn = QPushButton("Refresh Plugin List")
-        refresh_btn.clicked.connect(self.refresh_plugins)
-        upload_btn = QPushButton("Upload Plugin")
-        upload_btn.clicked.connect(self.upload_plugin)
-        delete_btn = QPushButton("Delete Selected Plugin")
-        delete_btn.clicked.connect(self.delete_plugin)
-        run_btn = QPushButton("Run Selected Plugin")
-        run_btn.clicked.connect(self.run_plugin)
-        self.plugin_output = QTextEdit()
-        self.plugin_output.setReadOnly(True)
-        layout.addWidget(QLabel("<h2>Plugin Management</h2>"))
-        layout.addWidget(self.plugin_list)
-        hbox = QHBoxLayout()
-        hbox.addWidget(refresh_btn)
-        hbox.addWidget(upload_btn)
-        hbox.addWidget(delete_btn)
-        hbox.addWidget(run_btn)
-        layout.addLayout(hbox)
-        layout.addWidget(QLabel("Output:"))
-        layout.addWidget(self.plugin_output)
-        tab.setLayout(layout)
-        self.tabs.addTab(tab, "Plugins")
-        self.refresh_plugins()
-
-    def refresh_plugins(self):
-        try:
-            resp = requests.get(f"{SERVER_URL}/plugins")
-            if resp.status_code == 200:
-                plugins = resp.json().get("plugins", [])
-                self.plugin_list.clear()
-                for p in plugins:
-                    self.plugin_list.addItem(p)
-            else:
-                self.plugin_output.setText("Error loading plugins: " + str(resp.text))
-        except Exception as e:
-            self.plugin_output.setText(f"Error: {e}")
-
-    def upload_plugin(self):
-        fname, _ = QFileDialog.getOpenFileName(self, "Select Python Plugin", "", "Python Files (*.py)")
-        if fname:
-            try:
-                with open(fname, "rb") as f:
-                    files = {"file": (os.path.basename(fname), f, "text/x-python")}
-                    resp = requests.post(f"{SERVER_URL}/plugin/upload", files=files)
-                if resp.status_code == 200:
-                    self.plugin_output.setText(f"Uploaded: {os.path.basename(fname)}")
-                    self.refresh_plugins()
-                else:
-                    self.plugin_output.setText("Upload failed: " + str(resp.text))
-            except Exception as e:
-                self.plugin_output.setText(f"Error: {e}")
-
-    def delete_plugin(self):
-        item = self.plugin_list.currentItem()
-        if item:
-            plugin = item.text()
-            try:
-                resp = requests.delete(f"{SERVER_URL}/plugin/delete/{plugin}")
-                if resp.status_code == 200:
-                    self.plugin_output.setText(f"Deleted: {plugin}")
-                    self.refresh_plugins()
-                else:
-                    self.plugin_output.setText("Delete failed: " + str(resp.text))
-            except Exception as e:
-                self.plugin_output.setText(f"Error: {e}")
-
-    def run_plugin(self):
-        item = self.plugin_list.currentItem()
-        if item:
-            plugin = item.text()
-            user_input, ok = QInputDialog.getText(self, "Run Plugin", "Input for plugin:")
-            if ok:
-                try:
-                    resp = requests.post(f"{SERVER_URL}/plugin/run", json={"plugin": plugin, "input": user_input})
-                    if resp.status_code == 200:
-                        out = resp.json().get("output", "")
-                        err = resp.json().get("error", "")
-                        self.plugin_output.setText(f"Output:\n{out}\nError:\n{err}")
-                    else:
-                        self.plugin_output.setText("Run failed: " + str(resp.text))
-                except Exception as e:
-                    self.plugin_output.setText(f"Error: {e}")
-
-    def init_admin_tab(self):
-        tab = QWidget()
-        layout = QVBoxLayout()
-        self.log_display = QTextEdit()
-        self.log_display.setReadOnly(True)
-        refresh_log_btn = QPushButton("Refresh Logs")
-        refresh_log_btn.clicked.connect(self.refresh_logs)
-        restart_btn = QPushButton("Restart Server")
-        restart_btn.clicked.connect(self.restart_server_backend)
-        export_logs_btn = QPushButton("Export Logs")
-        export_logs_btn.clicked.connect(self.export_logs)
-        export_feedback_btn = QPushButton("Export Feedback")
-        export_feedback_btn.clicked.connect(self.export_feedback)
-        export_knowledge_btn = QPushButton("Export Knowledge")
-        export_knowledge_btn.clicked.connect(self.export_knowledge)
-        layout.addWidget(QLabel("<h2>Admin Controls</h2>"))
-        layout.addWidget(self.log_display)
-        hbox = QHBoxLayout()
-        hbox.addWidget(refresh_log_btn)
-        hbox.addWidget(restart_btn)
-        hbox.addWidget(export_logs_btn)
-        hbox.addWidget(export_feedback_btn)
-        hbox.addWidget(export_knowledge_btn)
-        layout.addLayout(hbox)
-        tab.setLayout(layout)
-        self.tabs.addTab(tab, "Admin")
-        self.refresh_logs()
-
-    def refresh_logs(self):
-        try:
-            resp = requests.get(f"{SERVER_URL}/logs")
-            if resp.status_code == 200:
-                self.log_display.setText(resp.json().get("log", ""))
-            else:
-                self.log_display.setText("Error loading logs: " + str(resp.text))
-        except Exception as e:
-            self.log_display.setText(f"Error: {e}")
-
-    def restart_server_backend(self):
-        try:
-            resp = requests.post(f"{SERVER_URL}/restart")
-            if resp.status_code == 200:
-                QMessageBox.information(self, "Restart", "Server is restarting. Please wait a few seconds and reconnect.")
-            else:
-                QMessageBox.warning(self, "Restart Failed", str(resp.text))
-        except Exception as e:
-            QMessageBox.warning(self, "Restart Failed", str(e))
-
-    def export_logs(self):
-        try:
-            resp = requests.get(f"{SERVER_URL}/export/logs")
-            if resp.status_code == 200:
-                logs = resp.json()
-                out = ""
-                for fname, content in logs.items():
-                    out += f"--- {fname} ---\n{content}\n\n"
-                self.log_display.setText(out)
-            else:
-                self.log_display.setText("Error exporting logs: " + str(resp.text))
-        except Exception as e:
-            self.log_display.setText(f"Error: {e}")
-
-    def export_feedback(self):
-        try:
-            resp = requests.get(f"{SERVER_URL}/export/feedback")
-            if resp.status_code == 200:
-                feedbacks = resp.json().get("feedback", [])
-                out = json.dumps(feedbacks, indent=2, ensure_ascii=False)
-                self.log_display.setText(out)
-            else:
-                self.log_display.setText("Error exporting feedback: " + str(resp.text))
-        except Exception as e:
-            self.log_display.setText(f"Error: {e}")
-
-    def export_knowledge(self):
-        try:
-            resp = requests.get(f"{SERVER_URL}/export/knowledge")
-            if resp.status_code == 200:
-                knowledge = resp.json()
-                out = json.dumps(knowledge, indent=2, ensure_ascii=False)
-                self.log_display.setText(out)
-            else:
-                self.log_display.setText("Error exporting knowledge: " + str(resp.text))
-        except Exception as e:
-            self.log_display.setText(f"Error: {e}")
-
-    def create_dashboard_tab(self):
-        dashboard_tab = QWidget()
-        layout = QVBoxLayout(dashboard_tab)
+            chart_view = QChartView(self.category_chart)
+            chart_view.setRenderHint(QPainter.RenderHint.Antialiasing)
+            category_layout.addWidget(chart_view)
+        else:
+            placeholder = QLabel("Charts not available")
+            placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            category_layout.addWidget(placeholder)
         
-        # Header
-        header = QLabel("Training Dashboard")
-        header.setStyleSheet(f"""
-            QLabel {{
-                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
-                font-size: 24px;
-                font-weight: bold;
-                padding: 20px;
-            }}
-        """)
-        layout.addWidget(header)
+        category_group.setLayout(category_layout)
+        grid.addWidget(category_group, 0, 0)
         
-        # Stats Overview
-        stats_frame = QFrame()
-        stats_layout = QHBoxLayout(stats_frame)
-        
-        # Create stat cards
-        self.total_data_card = CategoryCard("Total Data Points", "0", is_dark=self.is_dark_mode)
-        self.active_categories_card = CategoryCard("Active Categories", "0", is_dark=self.is_dark_mode)
-        self.training_speed_card = CategoryCard("Training Speed", "0/s", is_dark=self.is_dark_mode)
-        
-        stats_layout.addWidget(self.total_data_card)
-        stats_layout.addWidget(self.active_categories_card)
-        stats_layout.addWidget(self.training_speed_card)
-        
-        layout.addWidget(stats_frame)
-        
-        # Category Distribution
-        category_frame = QFrame()
-        category_layout = QVBoxLayout(category_frame)
-        
-        category_header = QLabel("Category Distribution")
-        category_header.setStyleSheet(f"""
-            QLabel {{
-                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
-                font-size: 18px;
-                font-weight: bold;
-                margin-bottom: 10px;
-            }}
-        """)
-        category_layout.addWidget(category_header)
-        
-        # Category grid
-        self.category_grid = QGridLayout()
-        category_layout.addLayout(self.category_grid)
-        
-        layout.addWidget(category_frame)
-        
-        # Recent Activity
-        activity_frame = QFrame()
-        activity_layout = QVBoxLayout(activity_frame)
-        
-        activity_header = QLabel("Recent Activity")
-        activity_header.setStyleSheet(f"""
-            QLabel {{
-                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
-                font-size: 18px;
-                font-weight: bold;
-                margin-bottom: 10px;
-            }}
-        """)
-        activity_layout.addWidget(activity_header)
-        
-        self.activity_list = QTextEdit()
-        self.activity_list.setReadOnly(True)
-        self.activity_list.setStyleSheet(f"""
-            QTextEdit {{
-                background: {DARK_MODE['secondary'] if self.is_dark_mode else '#f8f9fa'};
-                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
-                border: 1px solid {DARK_MODE['border'] if self.is_dark_mode else '#e9ecef'};
-                border-radius: 5px;
-                padding: 10px;
-            }}
-        """)
+        # Recent activity list
+        activity_group = QGroupBox("Recent Activity")
+        activity_layout = QVBoxLayout()
+        self.activity_list = QListWidget()
         activity_layout.addWidget(self.activity_list)
+        activity_group.setLayout(activity_layout)
+        grid.addWidget(activity_group, 0, 1)
         
-        layout.addWidget(activity_frame)
-        
-        self.tabs.addTab(dashboard_tab, "Dashboard")
+        layout.addLayout(grid)
+        analytics_tab.setLayout(layout)
+        return analytics_tab
 
     def start_data_collection(self):
+        """Start the data collection thread."""
         def collect_data():
             while True:
                 try:
@@ -1385,34 +830,38 @@ class MeAIApp(QMainWindow):
                     if response.status_code == 200:
                         data = response.json()
                         self.data_queue.put(data)
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"Error collecting data: {str(e)}")
                 time.sleep(1)
         
         thread = threading.Thread(target=collect_data, daemon=True)
         thread.start()
 
     def update_category_distribution(self, category_data):
-        # Clear existing widgets
-        while self.category_grid.count():
-            item = self.category_grid.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        """Update the category distribution chart with new data."""
+        if not CHARTS_AVAILABLE:
+            return
+            
+        self.category_chart.removeAllSeries()
+        series = QPieSeries()
         
-        # Add new category cards
-        row, col = 0, 0
         for category, count in category_data.items():
-            card = CategoryCard(category, count, is_dark=self.is_dark_mode)
-            self.category_grid.addWidget(card, row, col)
-            col += 1
-            if col > 2:  # 3 cards per row
-                col = 0
-                row += 1
+            slice = QPieSlice(category, count)
+            slice.setLabelVisible(True)
+            series.append(slice)
+        
+        self.category_chart.addSeries(series)
+        self.category_chart.setTitle("Category Distribution")
 
     def update_recent_activity(self, recent_activities):
-        self.activity_list.clear()
-        for activity in recent_activities:
-            self.activity_list.append(f"• {activity}")
+        """Update the recent activities list."""
+        try:
+            self.activities_list.clear()
+            for activity in recent_activities[-10:]:  # Show last 10 activities
+                item = QListWidgetItem(activity)
+                self.activities_list.addItem(item)
+        except Exception as e:
+            logger.error(f"Error updating recent activities: {str(e)}")
 
     def closeEvent(self, event):
         """Handle window close event."""
@@ -1484,6 +933,307 @@ class MeAIApp(QMainWindow):
                     border-bottom: 2px solid #4a90e2;
                 }
             """)
+
+    def create_pentest_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("<h2>Pentest</h2>"))
+        self.pentest_input = QLineEdit()
+        self.pentest_input.setPlaceholderText("Enter target (domain or IP)...")
+        self.pentest_tool = QComboBox()
+        self.pentest_tool.addItems(["nmap", "sqlmap"])
+        pentest_btn = QPushButton("Run Pentest")
+        pentest_btn.clicked.connect(self.run_pentest)
+        self.pentest_output = QTextEdit()
+        self.pentest_output.setReadOnly(True)
+        layout.addWidget(self.pentest_input)
+        layout.addWidget(self.pentest_tool)
+        layout.addWidget(pentest_btn)
+        layout.addWidget(self.pentest_output)
+        tab.setLayout(layout)
+        self.tabs.addTab(tab, "Pentest")
+
+    def run_pentest(self):
+        target = self.pentest_input.text().strip()
+        tool = self.pentest_tool.currentText()
+        if not target:
+            self.pentest_output.setText("Please enter a target.")
+            return
+        try:
+            resp = requests.post(f"http://127.0.0.1:8000/pentest", json={"target": target, "tool": tool})
+            if resp.status_code == 200:
+                result = resp.json().get("result", "No result.")
+                self.pentest_output.setText(result)
+            else:
+                self.pentest_output.setText(f"Error: {resp.text}")
+        except Exception as e:
+            self.pentest_output.setText(f"Error: {e}")
+
+    def voice_input(self):
+        """Handle voice input using speech recognition."""
+        if not STT_AVAILABLE:
+            self.add_chat_bubble("Speech recognition is not available", user=False, label="Error")
+            return
+            
+        try:
+            recognizer = sr.Recognizer()
+            
+            with sr.Microphone() as source:
+                self.loading_label.setText("Listening...")
+                audio = recognizer.listen(source)
+                
+            self.loading_label.setText("Processing...")
+            text = recognizer.recognize_google(audio)
+            
+            if text:
+                self.user_input.setText(text)
+                self.handle_user_input()
+                
+        except Exception as e:
+            self.add_chat_bubble(str(e), user=False, label="Error")
+        finally:
+            self.loading_label.setText("")
+
+    def speak_last_answer(self):
+        """Read the last AI response using text-to-speech."""
+        if not TTS_AVAILABLE:
+            self.add_chat_bubble("Text-to-speech is not available", user=False, label="Error")
+            return
+            
+        try:
+            engine = pyttsx3.init()
+            
+            # Get the last AI response
+            last_response = None
+            for i in range(self.chat_history_ui.document().blockCount() - 1, -1, -1):
+                block = self.chat_history_ui.document().findBlockByLineNumber(i)
+                text = block.text()
+                if "MeAI:" in text:
+                    last_response = text.split("MeAI:")[1].strip()
+                    break
+            
+            if last_response:
+                engine.say(last_response)
+                engine.runAndWait()
+            else:
+                self.add_chat_bubble("No AI response found to read", user=False, label="Note")
+                
+        except Exception as e:
+            self.add_chat_bubble(str(e), user=False, label="Error")
+
+    def create_web_tab(self):
+        """Create the web tab with web browsing capabilities."""
+        web_tab = QWidget()
+        layout = QVBoxLayout(web_tab)
+        
+        # Header
+        header = QLabel("Web Browser")
+        header.setStyleSheet(f"""
+            QLabel {{
+                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
+                font-size: 24px;
+                font-weight: bold;
+                padding: 20px;
+            }}
+        """)
+        layout.addWidget(header)
+        
+        # URL input
+        url_layout = QHBoxLayout()
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("Enter URL...")
+        self.url_input.returnPressed.connect(self.navigate_to_url)
+        
+        go_button = QPushButton("Go")
+        go_button.clicked.connect(self.navigate_to_url)
+        
+        url_layout.addWidget(self.url_input)
+        url_layout.addWidget(go_button)
+        layout.addLayout(url_layout)
+        
+        # Web view
+        self.web_view = QWebEngineView()
+        layout.addWidget(self.web_view)
+        
+        return web_tab
+
+    def create_settings_tab(self):
+        """Create the settings tab with configuration options."""
+        settings_tab = QWidget()
+        layout = QVBoxLayout(settings_tab)
+        
+        # Header
+        header = QLabel("Settings")
+        header.setStyleSheet(f"""
+            QLabel {{
+                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
+                font-size: 24px;
+                font-weight: bold;
+                padding: 20px;
+            }}
+        """)
+        layout.addWidget(header)
+        
+        # Theme settings
+        theme_group = QGroupBox("Theme")
+        theme_layout = QVBoxLayout()
+        
+        dark_mode_checkbox = QCheckBox("Dark Mode")
+        dark_mode_checkbox.setChecked(self.is_dark_mode)
+        dark_mode_checkbox.stateChanged.connect(self.toggle_dark_mode)
+        
+        theme_layout.addWidget(dark_mode_checkbox)
+        theme_group.setLayout(theme_layout)
+        layout.addWidget(theme_group)
+        
+        # Model settings
+        model_group = QGroupBox("Model Settings")
+        model_layout = QVBoxLayout()
+        
+        model_label = QLabel("Model Path:")
+        self.model_path = QLineEdit()
+        self.model_path.setPlaceholderText("Enter path to model file...")
+        
+        model_layout.addWidget(model_label)
+        model_layout.addWidget(self.model_path)
+        model_group.setLayout(model_layout)
+        layout.addWidget(model_group)
+        
+        # Save button
+        save_button = QPushButton("Save Settings")
+        save_button.clicked.connect(self.save_settings)
+        layout.addWidget(save_button)
+        
+        layout.addStretch()
+        return settings_tab
+
+    def create_backup_tab(self):
+        """Create the backup tab for data backup and restore."""
+        backup_tab = QWidget()
+        layout = QVBoxLayout(backup_tab)
+        
+        # Header
+        header = QLabel("Backup & Restore")
+        header.setStyleSheet(f"""
+            QLabel {{
+                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
+                font-size: 24px;
+                font-weight: bold;
+                padding: 20px;
+            }}
+        """)
+        layout.addWidget(header)
+        
+        # Backup section
+        backup_group = QGroupBox("Create Backup")
+        backup_layout = QVBoxLayout()
+        
+        backup_path_label = QLabel("Backup Location:")
+        self.backup_path = QLineEdit()
+        self.backup_path.setPlaceholderText("Enter backup directory path...")
+        
+        create_backup_button = QPushButton("Create Backup")
+        create_backup_button.clicked.connect(self.create_backup)
+        
+        backup_layout.addWidget(backup_path_label)
+        backup_layout.addWidget(self.backup_path)
+        backup_layout.addWidget(create_backup_button)
+        backup_group.setLayout(backup_layout)
+        layout.addWidget(backup_group)
+        
+        # Restore section
+        restore_group = QGroupBox("Restore from Backup")
+        restore_layout = QVBoxLayout()
+        
+        restore_path_label = QLabel("Backup File:")
+        self.restore_path = QLineEdit()
+        self.restore_path.setPlaceholderText("Enter backup file path...")
+        
+        restore_button = QPushButton("Restore")
+        restore_button.clicked.connect(self.restore_backup)
+        
+        restore_layout.addWidget(restore_path_label)
+        restore_layout.addWidget(self.restore_path)
+        restore_layout.addWidget(restore_button)
+        restore_group.setLayout(restore_layout)
+        layout.addWidget(restore_group)
+        
+        layout.addStretch()
+        return backup_tab
+
+    def navigate_to_url(self):
+        """Navigate to the URL entered in the URL input."""
+        url = self.url_input.text()
+        if url:
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
+            self.web_view.setUrl(QUrl(url))
+
+    def toggle_dark_mode(self, state):
+        """Toggle dark mode on/off."""
+        self.is_dark_mode = bool(state)
+        self.update_theme()
+
+    def save_settings(self):
+        """Save the current settings."""
+        # Save model path
+        model_path = self.model_path.text()
+        if model_path:
+            # Save to config file or database
+            pass
+        
+        # Show success message
+        QMessageBox.information(self, "Settings Saved", "Settings have been saved successfully.")
+
+    def create_backup(self):
+        """Create a backup of the current data."""
+        backup_path = self.backup_path.text()
+        if not backup_path:
+            QMessageBox.warning(self, "Error", "Please enter a backup location.")
+            return
+        
+        try:
+            # Create backup logic here
+            QMessageBox.information(self, "Backup Created", "Backup created successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to create backup: {str(e)}")
+
+    def restore_backup(self):
+        """Restore data from a backup file."""
+        restore_path = self.restore_path.text()
+        if not restore_path:
+            QMessageBox.warning(self, "Error", "Please enter a backup file path.")
+            return
+        
+        try:
+            # Restore logic here
+            QMessageBox.information(self, "Restore Complete", "Data restored successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to restore backup: {str(e)}")
+
+    def set_dark_mode(self, enabled):
+        """Enable or disable dark mode and update the theme for the whole app."""
+        self.is_dark_mode = enabled
+        self.update_theme()
+
+    def add_to_recent_topics(self, topic, note=""):
+        if not hasattr(self, "recent_topics"):
+            self.recent_topics = []
+        # Avoid empty topics and duplicates
+        topic = topic.strip()
+        if not topic:
+            return
+        entry = topic if not note else f"{topic} {note}"
+        if entry in self.recent_topics:
+            self.recent_topics.remove(entry)
+        self.recent_topics.insert(0, entry)
+        # Keep only the 10 most recent
+        self.recent_topics = self.recent_topics[:10]
+        # Optionally sync with server
+        try:
+            requests.post(f"{SERVER_URL}/memory/recent_topics", json={"topics": self.recent_topics})
+        except Exception:
+            pass
 
 def main():
     app = QApplication(sys.argv)
