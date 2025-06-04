@@ -9,6 +9,7 @@ import markdown2
 import json
 import subprocess
 import os
+import platform
 
 APP_NAME = "MeAI"
 BRAND = "MeAI by Mesum Bin Shaukat\nOwner of World Of Tech"
@@ -211,6 +212,20 @@ class MeAIApp(QMainWindow):
     def toggle_cyber_mode(self):
         self.cyber_mode = self.cyber_checkbox.isChecked()
         # Optionally, reset chat history or update UI
+    def is_task_request(self, user_input):
+        """
+        Detect if the user input is a system-level task request.
+        This should match the backend's mapping logic.
+        """
+        nl = user_input.strip().lower()
+        if (
+            "open command prompt" in nl or "open cmd" in nl or "start command prompt" in nl or
+            "open powershell" in nl or "open terminal" in nl or
+            nl.startswith("run ") or nl.startswith("execute ")
+        ):
+            return True
+        # Optionally, add more patterns here
+        return False
     def send_chat(self):
         user_input = self.chat_input.text().strip()
         if not user_input:
@@ -220,13 +235,30 @@ class MeAIApp(QMainWindow):
         self.chat_input.clear()
         self.loading_label.setText("Thinking...")
         self.last_assistant_bubble_pos = None  # Reset for new response
-        # Add preferences to the request
         prefs = self.preferences.copy()
-        # Log user action
         try:
             requests.post(f"{SERVER_URL}/log_action", json={"action": "chat_query", "query": user_input, "preferences": prefs})
         except Exception:
             pass
+        # --- NEW: Task execution logic ---
+        if self.is_task_request(user_input):
+            try:
+                resp = requests.post(f"{SERVER_URL}/task/execute", json={"instruction": user_input}, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    msg = f"<b>Task executed:</b> <code>{data.get('command')}</code>"
+                    self.add_chat_bubble(msg, user=False, label="Task Execution")
+                    self.loading_label.setText("")
+                else:
+                    err = resp.json().get("error", str(resp.text))
+                    self.add_chat_bubble(f"<b>Task execution error:</b> {err}", user=False, label="Task Error")
+                    self.loading_label.setText("")
+            except Exception as e:
+                self.add_chat_bubble(f"<b>Task execution error:</b> {e}", user=False, label="Task Error")
+                self.loading_label.setText("")
+            self.add_to_recent_topics(user_input, "[Task executed]")
+            return
+        # --- END NEW ---
         self.streaming_worker = StreamingChatWorker(self.chat_history, user_input, cyber_mode=self.cyber_mode)
         self.streaming_worker.prefs = prefs
         self.streaming_worker.partial_signal.connect(self.display_partial_response)

@@ -19,6 +19,7 @@ import glob
 import sys
 import shutil
 import json
+import platform
 
 MODEL_PATH = "./models/mistral-7b-instruct/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
 CHROMA_DB_FOLDER = "./chroma_db"
@@ -712,4 +713,51 @@ async def batch_knowledge(request: dict):
         collection.add(documents=docs, metadatas=metadatas, ids=ids)
         return {"status": "ok", "count": len(docs)}
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)}) 
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+def map_natural_language_to_command(nl_request: str):
+    """
+    Map a natural language request to a system command string.
+    This is a simple intent-to-command mapping. Expand as needed.
+    """
+    nl = nl_request.strip().lower()
+    if "open command prompt" in nl or "open cmd" in nl or "start command prompt" in nl:
+        if platform.system() == "Windows":
+            return "start cmd.exe"
+        elif platform.system() == "Linux":
+            return "x-terminal-emulator || gnome-terminal || konsole || xterm"
+        elif platform.system() == "Darwin":
+            return "open -a Terminal"
+    if "open powershell" in nl:
+        if platform.system() == "Windows":
+            return "start powershell.exe"
+    if "open terminal" in nl:
+        if platform.system() == "Linux":
+            return "x-terminal-emulator || gnome-terminal || konsole || xterm"
+        elif platform.system() == "Darwin":
+            return "open -a Terminal"
+        elif platform.system() == "Windows":
+            return "start powershell.exe"
+    if nl.startswith("run ") or nl.startswith("execute "):
+        # e.g. "run notepad", "run calc", "run explorer"
+        cmd = nl.split(" ", 1)[1]
+        return cmd
+    # Fallback: treat as direct shell command
+    return nl_request
+
+@app.post("/task/execute")
+async def execute_task(request: dict):
+    """
+    Execute a system-level task from a natural language instruction, with no confirmation.
+    Fields: instruction (str)
+    Returns: result or error
+    """
+    instruction = request.get("instruction", "")
+    if not instruction:
+        return JSONResponse(status_code=400, content={"error": "No instruction provided."})
+    cmd = map_natural_language_to_command(instruction)
+    try:
+        result = subprocess.Popen(cmd, shell=True)
+        return {"status": "executed", "command": cmd}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e), "command": cmd}) 
