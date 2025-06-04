@@ -1,56 +1,64 @@
 import sys
-import requests
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QTabWidget, QFileDialog, QMessageBox, QProgressBar, QFrame, QCheckBox, QInputDialog, QListWidget, QListWidgetItem, QSplitter, QComboBox, QScrollArea, QGridLayout
-)
-from PyQt6.QtGui import QFont, QColor, QTextCharFormat, QTextCursor, QPalette, QLinearGradient, QGradient, QIcon
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve, QSize, QFileSystemWatcher
-import markdown2
-import json
-import subprocess
 import os
-import platform
+import json
+import requests
 import time
 from datetime import datetime
-from collections import defaultdict
-import threading
-import queue
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                            QHBoxLayout, QTextEdit, QPushButton, QLabel, 
+                            QTabWidget, QLineEdit, QComboBox, QProgressBar,
+                            QFrame, QScrollArea, QGridLayout, QFileDialog,
+                            QMessageBox, QCheckBox, QInputDialog, QListWidget,
+                            QListWidgetItem, QSplitter)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve, QSize, QFileSystemWatcher
+from PyQt6.QtGui import QFont, QPalette, QColor, QLinearGradient, QGradient, QIcon, QTextCharFormat, QTextCursor
+import markdown2
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
+from collections import defaultdict
+import threading
+import queue
 import importlib
 import logging
 
-APP_NAME = "MeAI"
-BRAND = "MeAI by Mesum Bin Shaukat\nOwner of World Of Tech"
-SERVER_URL = "http://127.0.0.1:8000"
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-DARK_STYLE = """
-QWidget { background-color: #181a1b; color: #e8eaed; font-family: 'Segoe UI', 'Arial', sans-serif; }
-QTextEdit, QLineEdit { background-color: #23272a; color: #e8eaed; border: 1px solid #444; border-radius: 4px; }
-QPushButton { background-color: #282c34; color: #e8eaed; border: 1px solid #444; border-radius: 4px; padding: 6px 12px; }
-QPushButton:hover { background-color: #3a3f4b; }
-QTabWidget::pane { border: 1px solid #444; }
-QTabBar::tab { background: #23272a; color: #e8eaed; padding: 8px; border: 1px solid #444; border-bottom: none; }
-QTabBar::tab:selected { background: #282c34; }
-QLabel { color: #e8eaed; }
-"""
+# Check for voice functionality
+try:
+    import speech_recognition as sr
+    STT_AVAILABLE = True
+except ImportError:
+    STT_AVAILABLE = False
+    logger.warning("Speech recognition not available. Install speech_recognition package for voice input.")
 
 try:
     import pyttsx3
     TTS_AVAILABLE = True
 except ImportError:
     TTS_AVAILABLE = False
-try:
-    from vosk import Model, KaldiRecognizer
-    import pyaudio
-    STT_AVAILABLE = True
-except ImportError:
-    STT_AVAILABLE = False
+    logger.warning("Text-to-speech not available. Install pyttsx3 package for voice output.")
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Dark mode color scheme
+DARK_MODE = {
+    'background': '#1e1e1e',
+    'foreground': '#ffffff',
+    'accent': '#4a90e2',
+    'secondary': '#2d2d2d',
+    'text': '#e0e0e0',
+    'border': '#3d3d3d',
+    'success': '#67b26f',
+    'warning': '#ffd700',
+    'error': '#ff6b6b'
+}
+
+# Server URL
+SERVER_URL = "http://localhost:8000"
+
+APP_NAME = "MeAI"
+BRAND = "MeAI by Mesum Bin Shaukat\nOwner of World Of Tech"
 
 class HotReloader:
     def __init__(self, app):
@@ -65,19 +73,19 @@ class HotReloader:
         try:
             current_modified = os.path.getmtime(path)
             if current_modified > self.last_modified:
-                logger.info("Detected UI changes, reloading...")
                 self.last_modified = current_modified
+                logger.info("Reloading UI...")
                 
                 # Reload the module
                 importlib.reload(sys.modules[__name__])
                 
-                # Recreate the main window
-                self.app.closeAllWindows()
-                new_window = MeAIApp()
-                new_window.show()
+                # Recreate the UI
+                self.app.close()
+                new_app = MeAIApp()
+                new_app.show()
                 
         except Exception as e:
-            logger.error(f"Error reloading UI: {e}")
+            logger.error(f"Error reloading UI: {str(e)}")
 
 class ChatWorker(QThread):
     response_signal = pyqtSignal(str)
@@ -142,100 +150,130 @@ class StreamingChatWorker(QThread):
             self.error_signal.emit(str(e))
 
 class ModernButton(QPushButton):
-    def __init__(self, text, parent=None):
+    def __init__(self, text, parent=None, is_dark=True):
         super().__init__(text, parent)
-        self.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                    stop:0 #4a90e2, stop:1 #67b26f);
-                border: none;
-                color: white;
-                padding: 10px 20px;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                    stop:0 #357abd, stop:1 #4a9e4f);
-            }
-            QPushButton:pressed {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                    stop:0 #2d6da3, stop:1 #3d7d42);
-            }
-        """)
-
-class AnimatedProgressBar(QProgressBar):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setStyleSheet("""
-            QProgressBar {
-                border: 2px solid #4a90e2;
-                border-radius: 5px;
-                text-align: center;
-                background-color: #f0f0f0;
-            }
-            QProgressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                    stop:0 #4a90e2, stop:1 #67b26f);
-                border-radius: 3px;
-            }
-        """)
-        self.animation = QPropertyAnimation(self, b"value")
-        self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.animation.setDuration(1000)
-
-    def setValue(self, value):
-        self.animation.setStartValue(self.value())
-        self.animation.setEndValue(value)
-        self.animation.start()
+        self.is_dark = is_dark
+        self.update_style()
+        
+    def update_style(self):
+        if self.is_dark:
+            self.setStyleSheet(f"""
+                QPushButton {{
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                        stop:0 {DARK_MODE['accent']}, stop:1 {DARK_MODE['success']});
+                    border: none;
+                    color: {DARK_MODE['foreground']};
+                    padding: 10px 20px;
+                    border-radius: 5px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                        stop:0 #357abd, stop:1 #4a9e4f);
+                }}
+                QPushButton:pressed {{
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                        stop:0 #2d6da3, stop:1 #3d7d42);
+                }}
+            """)
+        else:
+            self.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                        stop:0 #4a90e2, stop:1 #67b26f);
+                    border: none;
+                    color: white;
+                    padding: 10px 20px;
+                    border-radius: 5px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                        stop:0 #357abd, stop:1 #4a9e4f);
+                }
+                QPushButton:pressed {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                        stop:0 #2d6da3, stop:1 #3d7d42);
+                }
+            """)
 
 class CategoryCard(QFrame):
-    def __init__(self, title, count, parent=None):
+    def __init__(self, title, count, parent=None, is_dark=True):
         super().__init__(parent)
-        self.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, 
-                    stop:0 #ffffff, stop:1 #f8f9fa);
-                border-radius: 10px;
-                border: 1px solid #e9ecef;
-            }
-        """)
+        self.is_dark = is_dark
+        self.update_style()
+        
         layout = QVBoxLayout()
         
         title_label = QLabel(title)
-        title_label.setStyleSheet("""
-            QLabel {
-                color: #2c3e50;
-                font-size: 16px;
-                font-weight: bold;
-            }
-        """)
-        
         count_label = QLabel(str(count))
-        count_label.setStyleSheet("""
-            QLabel {
-                color: #4a90e2;
-                font-size: 24px;
-                font-weight: bold;
-            }
-        """)
+        
+        if self.is_dark:
+            title_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {DARK_MODE['text']};
+                    font-size: 16px;
+                    font-weight: bold;
+                }}
+            """)
+            count_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {DARK_MODE['accent']};
+                    font-size: 24px;
+                    font-weight: bold;
+                }}
+            """)
+        else:
+            title_label.setStyleSheet("""
+                QLabel {
+                    color: #2c3e50;
+                    font-size: 16px;
+                    font-weight: bold;
+                }
+            """)
+            count_label.setStyleSheet("""
+                QLabel {
+                    color: #4a90e2;
+                    font-size: 24px;
+                    font-weight: bold;
+                }
+            """)
         
         layout.addWidget(title_label)
         layout.addWidget(count_label)
         self.setLayout(layout)
+    
+    def update_style(self):
+        if self.is_dark:
+            self.setStyleSheet(f"""
+                QFrame {{
+                    background: {DARK_MODE['secondary']};
+                    border-radius: 10px;
+                    border: 1px solid {DARK_MODE['border']};
+                }}
+            """)
+        else:
+            self.setStyleSheet("""
+                QFrame {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, 
+                        stop:0 #ffffff, stop:1 #f8f9fa);
+                    border-radius: 10px;
+                    border: 1px solid #e9ecef;
+                }
+            """)
 
 class MeAIApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("MeAI Desktop")
+        self.setWindowTitle("MeAI - Advanced AI Assistant")
         self.setGeometry(100, 100, 1200, 800)
         
-        # Initialize system information
-        self.system_info = None
-        self.update_system_info()
-        
-        # Initialize hot reloader
-        self.hot_reloader = HotReloader(QApplication.instance())
+        # Initialize data structures
+        self.training_data = defaultdict(int)
+        self.category_data = defaultdict(int)
+        self.recent_activities = []
+        self.data_queue = queue.Queue()
+        self.is_dark_mode = True
         
         # Create main widget and layout
         main_widget = QWidget()
@@ -244,56 +282,18 @@ class MeAIApp(QMainWindow):
         
         # Create tab widget
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #e9ecef;
-                border-radius: 5px;
-                background: white;
-            }
-            QTabBar::tab {
-                background: #f8f9fa;
-                border: 1px solid #e9ecef;
-                padding: 8px 16px;
-                margin-right: 2px;
-            }
-            QTabBar::tab:selected {
-                background: white;
-                border-bottom: 2px solid #4a90e2;
-            }
-        """)
+        self.update_theme()
+        
+        # Create all tabs
+        self.create_chat_tab()
+        self.create_dashboard_tab()
+        self.create_analytics_tab()
+        self.create_pentest_tab()
+        self.create_webscrape_tab()
+        self.create_settings_tab()
+        self.create_backup_tab()
+        
         layout.addWidget(self.tabs)
-        
-        # Initialize tabs
-        self.init_chat_tab()
-        self.init_dashboard_tab()
-        
-        # Initialize chat history with system context
-        self.chat_history = [
-            {
-                "role": "system",
-                "content": f"""You are a helpful, knowledgeable AI assistant with direct access to the user's system.
-                You can execute system commands and access local resources.
-                Current system information:
-                Platform: {self.system_info.get('platform', 'Unknown')}
-                Version: {self.system_info.get('platform_version', 'Unknown')}
-                Architecture: {self.system_info.get('architecture', 'Unknown')}
-                Available drives: {', '.join([d['drive'] for d in self.system_info.get('drives', [])])}
-                
-                You can directly execute commands like:
-                - Opening applications (e.g., "open notepad", "open chrome")
-                - Running system commands (e.g., "open command prompt", "open powershell")
-                - Accessing files and directories
-                
-                Always execute commands directly when requested, don't just provide instructions.
-                """
-            }
-        ]
-
-        # Initialize data structures
-        self.training_data = defaultdict(int)
-        self.category_data = defaultdict(int)
-        self.recent_activities = []
-        self.data_queue = queue.Queue()
         
         # Start data collection thread
         self.start_data_collection()
@@ -302,22 +302,180 @@ class MeAIApp(QMainWindow):
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_ui)
         self.update_timer.start(1000)  # Update every second
-
-    def update_system_info(self):
-        """Update system information from the server."""
+        
+        # Initialize hot reloader
+        self.hot_reloader = HotReloader(self)
+        
+    def update_ui(self):
+        """Update the UI with the latest data."""
         try:
-            response = requests.post("http://localhost:8000/system/info")
-            if response.status_code == 200:
-                self.system_info = response.json()
+            while not self.data_queue.empty():
+                data = self.data_queue.get_nowait()
+                
+                # Update total data
+                total_data = sum(data['category_data'].values())
+                if hasattr(self, 'total_data_card'):
+                    count_label = self.total_data_card.findChild(QLabel, "", Qt.FindChildOption.FindChildrenRecursively)[1]
+                    if count_label:
+                        count_label.setText(str(total_data))
+                
+                # Update active categories
+                active_categories = len(data['category_data'])
+                if hasattr(self, 'active_categories_card'):
+                    count_label = self.active_categories_card.findChild(QLabel, "", Qt.FindChildOption.FindChildrenRecursively)[1]
+                    if count_label:
+                        count_label.setText(str(active_categories))
+                
+                # Update training speed
+                if hasattr(self, 'training_speed_card'):
+                    count_label = self.training_speed_card.findChild(QLabel, "", Qt.FindChildOption.FindChildrenRecursively)[1]
+                    if count_label:
+                        count_label.setText(f"{data['training_speed']}/s")
+                
+                # Update category distribution
+                if hasattr(self, 'category_grid'):
+                    self.update_category_distribution(data['category_data'])
+                
+                # Update recent activity
+                if hasattr(self, 'activity_list'):
+                    self.update_recent_activity(data['recent_activities'])
         except Exception as e:
-            print(f"Error updating system info: {e}")
-            self.system_info = {}
+            logger.error(f"Error updating UI: {str(e)}")
 
-    def is_task_request(self, user_input):
-        """
-        Enhanced detection of system-level task requests.
-        """
-        nl = user_input.strip().lower()
+    def create_chat_tab(self):
+        chat_tab = QWidget()
+        layout = QVBoxLayout(chat_tab)
+        
+        # Chat history
+        self.chat_history = QTextEdit()
+        self.chat_history.setReadOnly(True)
+        self.chat_history.setStyleSheet(f"""
+            QTextEdit {{
+                background: {DARK_MODE['secondary'] if self.is_dark_mode else '#f8f9fa'};
+                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
+                border: 1px solid {DARK_MODE['border'] if self.is_dark_mode else '#e9ecef'};
+                border-radius: 5px;
+                padding: 10px;
+            }}
+        """)
+        layout.addWidget(self.chat_history)
+        
+        # Input area
+        input_layout = QHBoxLayout()
+        
+        self.user_input = QLineEdit()
+        self.user_input.setPlaceholderText("Type your message here...")
+        self.user_input.setStyleSheet(f"""
+            QLineEdit {{
+                background: {DARK_MODE['secondary'] if self.is_dark_mode else '#f8f9fa'};
+                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
+                border: 1px solid {DARK_MODE['border'] if self.is_dark_mode else '#e9ecef'};
+                border-radius: 5px;
+                padding: 10px;
+            }}
+        """)
+        self.user_input.returnPressed.connect(self.handle_user_input)
+        
+        # Voice input button
+        self.mic_button = ModernButton("🎤", is_dark=self.is_dark_mode)
+        self.mic_button.setToolTip("Voice Input")
+        self.mic_button.clicked.connect(self.voice_input)
+        self.mic_button.setEnabled(STT_AVAILABLE)
+        
+        # Voice output button
+        self.speaker_button = ModernButton("🔊", is_dark=self.is_dark_mode)
+        self.speaker_button.setToolTip("Read Last Answer")
+        self.speaker_button.clicked.connect(self.speak_last_answer)
+        self.speaker_button.setEnabled(TTS_AVAILABLE)
+        
+        # Send button
+        send_button = ModernButton("Send", is_dark=self.is_dark_mode)
+        send_button.clicked.connect(self.handle_user_input)
+        
+        # Clear button
+        clear_button = ModernButton("Clear", is_dark=self.is_dark_mode)
+        clear_button.clicked.connect(self.clear_chat)
+        
+        input_layout.addWidget(self.user_input)
+        input_layout.addWidget(self.mic_button)
+        input_layout.addWidget(self.speaker_button)
+        input_layout.addWidget(send_button)
+        input_layout.addWidget(clear_button)
+        
+        layout.addLayout(input_layout)
+        
+        # Loading indicator
+        self.loading_label = QLabel("")
+        self.loading_label.setStyleSheet(f"""
+            QLabel {{
+                color: {DARK_MODE['warning'] if self.is_dark_mode else '#fbbc04'};
+                font-weight: bold;
+            }}
+        """)
+        layout.addWidget(self.loading_label)
+        
+        self.tabs.addTab(chat_tab, "Chat")
+        
+        # Initialize chat history with system context
+        self.chat_history.append(f"""
+            <p style='color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};'>
+                <b>System:</b> Welcome to MeAI! I can help you with various tasks including:
+                <ul>
+                    <li>Executing system commands</li>
+                    <li>Opening applications</li>
+                    <li>Managing files and directories</li>
+                    <li>Answering questions and providing assistance</li>
+                </ul>
+                How can I help you today?
+            </p>
+        """)
+
+    def handle_user_input(self):
+        """Handle user input with enhanced system command support."""
+        user_message = self.user_input.text().strip()
+        if not user_message:
+            return
+            
+        # Add user message to chat
+        self.chat_history.append(f"<p style='color: {DARK_MODE['accent'] if self.is_dark_mode else '#4a90e2'};'><b>You:</b> {user_message}</p>")
+        self.user_input.clear()
+        
+        # Check if it's a system command
+        if self.is_task_request(user_message):
+            try:
+                response = requests.post(
+                    f"{SERVER_URL}/task/execute",
+                    json={"instruction": user_message}
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    self.chat_history.append(f"<p style='color: {DARK_MODE['success'] if self.is_dark_mode else '#67b26f'};'><b>System:</b> {result['message']}</p>")
+                else:
+                    self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> Failed to execute command</p>")
+            except Exception as e:
+                self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> {str(e)}</p>")
+        else:
+            # Handle regular chat
+            try:
+                response = requests.post(
+                    f"{SERVER_URL}/chat",
+                    json={"message": user_message}
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    self.chat_history.append(f"<p style='color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};'><b>MeAI:</b> {result['response']}</p>")
+                else:
+                    self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> Failed to get response</p>")
+            except Exception as e:
+                self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> {str(e)}</p>")
+        
+        # Scroll to bottom
+        self.chat_history.verticalScrollBar().setValue(
+            self.chat_history.verticalScrollBar().maximum()
+        )
+    def is_task_request(self, text):
+        """Check if the text is a system command request."""
+        nl = text.strip().lower()
         
         # Check for application launch requests
         if any(pattern in nl for pattern in [
@@ -341,111 +499,6 @@ class MeAIApp(QMainWindow):
             
         return False
 
-    def handle_user_input(self):
-        """Handle user input with enhanced system command support."""
-        user_input = self.input_field.text().strip()
-        if not user_input:
-            return
-            
-        self.input_field.clear()
-        self.add_message("You", user_input)
-        
-        # Check if it's a system command
-        if self.is_task_request(user_input):
-            try:
-                response = requests.post(
-                    "http://localhost:8000/task/execute",
-                    json={"instruction": user_input}
-                )
-                if response.status_code == 200:
-                    result = response.json()
-                    self.add_message("MeAI", f"Executed command: {result['command']}")
-                else:
-                    error = response.json().get("error", "Unknown error")
-                    self.add_message("MeAI", f"Error executing command: {error}")
-            except Exception as e:
-                self.add_message("MeAI", f"Error: {str(e)}")
-            return
-            
-        # Handle regular chat
-        self.chat_history.append({"role": "user", "content": user_input})
-        
-        try:
-            response = requests.post(
-                "http://localhost:8000/chat",
-                json={"messages": self.chat_history}
-            )
-            if response.status_code == 200:
-                result = response.json()
-                ai_response = result.get("response", "Sorry, I couldn't process that.")
-                self.add_message("MeAI", ai_response)
-                self.chat_history.append({"role": "assistant", "content": ai_response})
-            else:
-                self.add_message("MeAI", "Error: Could not get response from server.")
-        except Exception as e:
-            self.add_message("MeAI", f"Error: {str(e)}")
-
-    def init_chat_tab(self):
-        tab = QWidget()
-        layout = QVBoxLayout()
-        self.chat_display = QTextEdit()
-        self.chat_display.setReadOnly(True)
-        self.chat_display.setFrameStyle(QFrame.Shape.NoFrame)
-        self.chat_input = QLineEdit()
-        self.chat_input.setPlaceholderText("Type your message and press Enter...")
-        self.chat_input.returnPressed.connect(self.send_chat)
-        send_btn = QPushButton("Send")
-        send_btn.clicked.connect(self.send_chat)
-        clear_btn = QPushButton("Clear Chat")
-        clear_btn.clicked.connect(self.clear_chat)
-        # Voice input/output buttons
-        mic_btn = QPushButton("🎤")
-        mic_btn.setToolTip("Voice Input")
-        mic_btn.clicked.connect(self.voice_input)
-        mic_btn.setEnabled(STT_AVAILABLE)
-        speaker_btn = QPushButton("🔊")
-        speaker_btn.setToolTip("Read Last Answer")
-        speaker_btn.clicked.connect(self.speak_last_answer)
-        speaker_btn.setEnabled(TTS_AVAILABLE)
-        self.loading_label = QLabel("")
-        self.loading_label.setStyleSheet("color:#fbbc04;font-weight:bold;")
-        # Cybersecurity Mode Checkbox
-        self.cyber_checkbox = QCheckBox("Cybersecurity Mode (Expert)")
-        self.cyber_checkbox.setChecked(False)
-        self.cyber_checkbox.stateChanged.connect(self.toggle_cyber_mode)
-        layout.addWidget(QLabel(f"<h2>{APP_NAME} Chat</h2>"))
-        layout.addWidget(self.cyber_checkbox)
-        layout.addWidget(self.chat_display)
-        hbox = QHBoxLayout()
-        hbox.addWidget(self.chat_input)
-        hbox.addWidget(send_btn)
-        hbox.addWidget(mic_btn)
-        hbox.addWidget(speaker_btn)
-        hbox.addWidget(clear_btn)
-        layout.addLayout(hbox)
-        layout.addWidget(self.loading_label)
-        tab.setLayout(layout)
-        self.tabs.addTab(tab, "Chat")
-        self.chat_history = [
-            {"role": "system", "content": "You are a helpful, knowledgeable AI assistant. Answer as helpfully as possible."}
-        ]
-    def toggle_cyber_mode(self):
-        self.cyber_mode = self.cyber_checkbox.isChecked()
-        # Optionally, reset chat history or update UI
-    def is_task_request(self, user_input):
-        """
-        Detect if the user input is a system-level task request.
-        This should match the backend's mapping logic.
-        """
-        nl = user_input.strip().lower()
-        if (
-            "open command prompt" in nl or "open cmd" in nl or "start command prompt" in nl or
-            "open powershell" in nl or "open terminal" in nl or
-            nl.startswith("run ") or nl.startswith("execute ")
-        ):
-            return True
-        # Optionally, add more patterns here
-        return False
     def send_chat(self):
         user_input = self.chat_input.text().strip()
         if not user_input:
@@ -488,14 +541,14 @@ class MeAIApp(QMainWindow):
         self.add_to_recent_topics(user_input, "")
     def display_partial_response(self, partial):
         html = f"<div style='background:#23272a;padding:10px;border-radius:10px;margin:8px;max-width:70%;float:left;color:#f28b82;'><span style='font-weight:bold'>MeAI:</span><br>{markdown2.markdown(partial)}</div><div style='clear:both'></div>"
-        cursor = self.chat_display.textCursor()
-        doc = self.chat_display.document()
+        cursor = self.chat_history.textCursor()
+        doc = self.chat_history.document()
         if self.last_assistant_bubble_pos is None:
             # Insert new bubble and record its position
             cursor.movePosition(QTextCursor.MoveOperation.End)
-            self.chat_display.setTextCursor(cursor)
-            self.chat_display.insertHtml(html)
-            self.chat_display.append("")  # Ensure new line after bubble
+            self.chat_history.setTextCursor(cursor)
+            self.chat_history.insertHtml(html)
+            self.chat_history.append("")  # Ensure new line after bubble
             self.last_assistant_bubble_pos = doc.characterCount() - 2  # -2 for trailing newline
         else:
             # Replace the last assistant bubble in place
@@ -531,7 +584,7 @@ class MeAIApp(QMainWindow):
             for r in web_results:
                 html += f"<li><a href='{r.get('href','')}' style='color:#8ab4f8'>{r.get('title','')}</a><br>{r.get('body','')}</li>"
             html += "</ul></div><div style='clear:both'></div>"
-            self.chat_display.append(html)
+            self.chat_history.append(html)
         # RAG fallback
         if rag_results:
             html = "<div style='background:#23272a;padding:10px;border-radius:10px;margin:8px;max-width:70%;float:left;color:#34a853;'><b>Knowledge Base Results:</b><ul>"
@@ -544,7 +597,7 @@ class MeAIApp(QMainWindow):
                 else:
                     html += f"<li>{r}</li>"
             html += "</ul></div><div style='clear:both'></div>"
-            self.chat_display.append(html)
+            self.chat_history.append(html)
         # Suggestions (active follow-up)
         if suggestions:
             self.add_suggestion_buttons(suggestions)
@@ -563,9 +616,9 @@ class MeAIApp(QMainWindow):
         align = "right" if user else "left"
         label_html = f"<span style='font-size:10px;color:#aaa;'>{label}</span><br>" if label else ""
         bubble = f"<div style='background:#23272a;padding:10px;border-radius:10px;margin:8px;max-width:70%;float:{align};color:{color};'>{label_html}<span style='font-weight:bold'>{'You' if user else 'MeAI'}:</span><br>{html}</div><div style='clear:both'></div>"
-        self.chat_display.append(bubble)
+        self.chat_history.append(bubble)
     def clear_chat(self):
-        self.chat_display.clear()
+        self.chat_history.clear()
         self.chat_history = [
             {"role": "system", "content": "You are a helpful, knowledgeable AI assistant. Answer as helpfully as possible."}
         ]
@@ -842,10 +895,10 @@ class MeAIApp(QMainWindow):
         layout.addWidget(down_btn)
         layout.addWidget(correction_btn)
         feedback_widget.setLayout(layout)
-        self.chat_display.insertPlainText("\n")
-        self.chat_display.setFocus()
-        self.chat_display.append("")
-        self.chat_display.viewport().setProperty("feedback_widget", feedback_widget)
+        self.chat_history.insertPlainText("\n")
+        self.chat_history.setFocus()
+        self.chat_history.append("")
+        self.chat_history.viewport().setProperty("feedback_widget", feedback_widget)
         # Connect
         def send_feedback(up):
             self._feedback_given = True
@@ -889,7 +942,7 @@ class MeAIApp(QMainWindow):
         down_btn.clicked.connect(lambda: send_feedback(False))
         correction_btn.clicked.connect(send_correction)
         # Show in chat (simulate by appending a line)
-        self.chat_display.append("<div style='margin:8px;'><button>👍</button> <button>👎</button> <button>✏️</button> <span style='color:#888'>Was this helpful?</span></div>")
+        self.chat_history.append("<div style='margin:8px;'><button>👍</button> <button>👎</button> <button>✏️</button> <span style='color:#888'>Was this helpful?</span></div>")
 
     def add_suggestion_buttons(self, suggestions):
         from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton
@@ -902,9 +955,9 @@ class MeAIApp(QMainWindow):
             btn.clicked.connect(lambda _, text=s: self.send_suggestion(text))
             layout.addWidget(btn)
         suggestion_widget.setLayout(layout)
-        self.chat_display.append("<div style='margin:8px;'><b>Suggestions:</b></div>")
-        self.chat_display.append("")
-        self.chat_display.viewport().setProperty("suggestion_widget", suggestion_widget)
+        self.chat_history.append("<div style='margin:8px;'><b>Suggestions:</b></div>")
+        self.chat_history.append("")
+        self.chat_history.viewport().setProperty("suggestion_widget", suggestion_widget)
 
     def send_suggestion(self, text):
         self.chat_input.setText(text)
@@ -1016,85 +1069,56 @@ class MeAIApp(QMainWindow):
         self.save_preferences()
 
     def voice_input(self):
+        """Handle voice input using speech recognition."""
         if not STT_AVAILABLE:
-            QMessageBox.warning(self, "Voice Input", "Speech-to-text is not available. Please install vosk and pyaudio.")
+            self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> Speech recognition is not available</p>")
             return
+            
         try:
-            lang = self.preferences.get("language", "English")
-            if lang == "Urdu":
-                model_path = "vosk-model-small-ur-0.22"  # Path to Urdu model
-            else:
-                model_path = "vosk-model-small-en-us-0.15"  # Path to English model
-            if not os.path.exists(model_path):
-                QMessageBox.warning(self, "Voice Input", f"Vosk model not found: {model_path}")
-                return
-            model = Model(model_path)
-            rec = KaldiRecognizer(model, 16000)
-            p = pyaudio.PyAudio()
-            stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=8000)
-            stream.start_stream()
-            self.loading_label.setText("Listening...")
-            import time
-            result = ""
-            start = time.time()
-            while True:
-                data = stream.read(4000, exception_on_overflow=False)
-                if rec.AcceptWaveform(data):
-                    res = rec.Result()
-                    import json as _json
-                    text = _json.loads(res).get("text", "")
-                    if text:
-                        result += text + " "
-                        break
-                if time.time() - start > 8:
-                    break
-            stream.stop_stream()
-            stream.close()
-            p.terminate()
-            self.loading_label.setText("")
-            if result.strip():
-                if lang == "Transliteration":
-                    result = self.transliterate_to_urdu(result.strip())
-                self.chat_input.setText(result.strip())
-                self.send_chat()
-            else:
-                QMessageBox.information(self, "Voice Input", "No speech detected.")
+            recognizer = sr.Recognizer()
+            
+            with sr.Microphone() as source:
+                self.loading_label.setText("Listening...")
+                audio = recognizer.listen(source)
+                
+            self.loading_label.setText("Processing...")
+            text = recognizer.recognize_google(audio)
+            
+            if text:
+                self.user_input.setText(text)
+                self.handle_user_input()
+                
         except Exception as e:
+            self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> {str(e)}</p>")
+        finally:
             self.loading_label.setText("")
-            QMessageBox.critical(self, "Voice Input Error", str(e))
+
     def speak_last_answer(self):
+        """Read the last AI response using text-to-speech."""
         if not TTS_AVAILABLE:
-            QMessageBox.warning(self, "Text-to-Speech", "pyttsx3 is not available. Please install pyttsx3.")
+            self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> Text-to-speech is not available</p>")
             return
+            
         try:
-            last_answer = ""
-            for msg in reversed(self.chat_history):
-                if msg["role"] == "assistant":
-                    last_answer = msg["content"]
-                    break
-            if not last_answer:
-                QMessageBox.information(self, "Text-to-Speech", "No assistant answer to read.")
-                return
-            lang = self.preferences.get("language", "English")
             engine = pyttsx3.init()
-            voices = engine.getProperty('voices')
-            if lang == "Urdu":
-                # Try to select an Urdu voice if available
-                for v in voices:
-                    if "urdu" in v.name.lower() or "urdu" in v.languages:
-                        engine.setProperty('voice', v.id)
-                        break
-            elif lang == "Transliteration":
-                last_answer = self.transliterate_to_urdu(last_answer)
-            # Otherwise use default voice
-            engine.say(last_answer)
-            engine.runAndWait()
+            
+            # Get the last AI response
+            last_response = None
+            for i in range(self.chat_history.document().blockCount() - 1, -1, -1):
+                block = self.chat_history.document().findBlockByLineNumber(i)
+                text = block.text()
+                if "MeAI:" in text:
+                    last_response = text.split("MeAI:")[1].strip()
+                    break
+            
+            if last_response:
+                engine.say(last_response)
+                engine.runAndWait()
+            else:
+                self.chat_history.append(f"<p style='color: {DARK_MODE['warning'] if self.is_dark_mode else '#fbbc04'};'><b>Note:</b> No AI response found to read</p>")
+                
         except Exception as e:
-            QMessageBox.critical(self, "Text-to-Speech Error", str(e))
-    def transliterate_to_urdu(self, text):
-        # Simple placeholder for transliteration logic
-        # In production, use a proper transliteration library
-        return text.replace('a', 'ا').replace('i', 'ی').replace('u', 'و').replace('e', 'ے').replace('o', 'و')
+            self.chat_history.append(f"<p style='color: {DARK_MODE['error'] if self.is_dark_mode else '#ff6b6b'};'><b>Error:</b> {str(e)}</p>")
 
     def init_plugins_tab(self):
         tab = QWidget()
@@ -1269,94 +1293,89 @@ class MeAIApp(QMainWindow):
         except Exception as e:
             self.log_display.setText(f"Error: {e}")
 
-    def init_dashboard_tab(self):
-        tab = QWidget()
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("<h2>Analytics Dashboard</h2>"))
-        from pyqtgraph import PlotWidget
-        self.plot_widget = PlotWidget()
-        layout.addWidget(self.plot_widget)
-        self.dashboard_stats = QTextEdit()
-        self.dashboard_stats.setReadOnly(True)
-        layout.addWidget(self.dashboard_stats)
-        refresh_btn = QPushButton("Refresh Analytics")
-        refresh_btn.clicked.connect(self.refresh_dashboard)
-        layout.addWidget(refresh_btn)
-        # Web scraping UI
-        self.scrape_input = QLineEdit()
-        self.scrape_input.setPlaceholderText("Enter URL to scrape...")
-        scrape_btn = QPushButton("Scrape Website")
-        scrape_btn.clicked.connect(self.run_scrape)
-        self.scrape_output = QTextEdit()
-        self.scrape_output.setReadOnly(True)
-        layout.addWidget(QLabel("<b>Web Scraping</b>"))
-        layout.addWidget(self.scrape_input)
-        layout.addWidget(scrape_btn)
-        layout.addWidget(self.scrape_output)
-        # Pentesting UI
-        self.pentest_input = QLineEdit()
-        self.pentest_input.setPlaceholderText("Enter target (IP or URL) for pentest...")
-        self.pentest_tool = QComboBox()
-        self.pentest_tool.addItems(["nmap", "sqlmap"])
-        pentest_btn = QPushButton("Run Pentest")
-        pentest_btn.clicked.connect(self.run_pentest)
-        self.pentest_output = QTextEdit()
-        self.pentest_output.setReadOnly(True)
-        layout.addWidget(QLabel("<b>Pentesting</b>"))
-        layout.addWidget(self.pentest_input)
-        layout.addWidget(self.pentest_tool)
-        layout.addWidget(pentest_btn)
-        layout.addWidget(self.pentest_output)
-        tab.setLayout(layout)
-        self.tabs.insertTab(1, tab, "Dashboard")
-        self.refresh_dashboard()
-
-    def refresh_dashboard(self):
-        import requests
-        try:
-            stats = requests.get(f"{SERVER_URL}/analytics").json()
-            mem_stats = requests.get(f"{SERVER_URL}/memory/usage").json()
-            self.dashboard_stats.setText(
-                f"Documents: {stats['docs']}\nRepos: {stats['repos']}\nTasks: {stats['tasks']}\nWeb Scrapes: {stats['scrapes']}\nPentest Runs: {stats['pentests']}\nRAM: {mem_stats['ram']}%\nCPU: {mem_stats['cpu']}%"
-            )
-            # Example plot: RAM usage
-            self.plot_widget.clear()
-            self.plot_widget.plot([mem_stats['ram'], mem_stats['cpu']], pen='g', symbol='o')
-        except Exception as e:
-            self.dashboard_stats.setText(f"Error: {e}")
-
-    def run_scrape(self):
-        import requests
-        url = self.scrape_input.text().strip()
-        if not url:
-            self.scrape_output.setText("No URL entered.")
-            return
-        try:
-            resp = requests.post(f"{SERVER_URL}/scrape", json={"url": url})
-            if resp.status_code == 200:
-                self.scrape_output.setText(resp.json().get("text", ""))
-                self.refresh_dashboard()
-            else:
-                self.scrape_output.setText("Error: " + str(resp.text))
-        except Exception as e:
-            self.scrape_output.setText(f"Error: {e}")
-
-    def run_pentest(self):
-        import requests
-        target = self.pentest_input.text().strip()
-        tool = self.pentest_tool.currentText()
-        if not target:
-            self.pentest_output.setText("No target entered.")
-            return
-        try:
-            resp = requests.post(f"{SERVER_URL}/pentest", json={"target": target, "tool": tool})
-            if resp.status_code == 200:
-                self.pentest_output.setText(resp.json().get("result", ""))
-                self.refresh_dashboard()
-            else:
-                self.pentest_output.setText("Error: " + str(resp.text))
-        except Exception as e:
-            self.pentest_output.setText(f"Error: {e}")
+    def create_dashboard_tab(self):
+        dashboard_tab = QWidget()
+        layout = QVBoxLayout(dashboard_tab)
+        
+        # Header
+        header = QLabel("Training Dashboard")
+        header.setStyleSheet(f"""
+            QLabel {{
+                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
+                font-size: 24px;
+                font-weight: bold;
+                padding: 20px;
+            }}
+        """)
+        layout.addWidget(header)
+        
+        # Stats Overview
+        stats_frame = QFrame()
+        stats_layout = QHBoxLayout(stats_frame)
+        
+        # Create stat cards
+        self.total_data_card = CategoryCard("Total Data Points", "0", is_dark=self.is_dark_mode)
+        self.active_categories_card = CategoryCard("Active Categories", "0", is_dark=self.is_dark_mode)
+        self.training_speed_card = CategoryCard("Training Speed", "0/s", is_dark=self.is_dark_mode)
+        
+        stats_layout.addWidget(self.total_data_card)
+        stats_layout.addWidget(self.active_categories_card)
+        stats_layout.addWidget(self.training_speed_card)
+        
+        layout.addWidget(stats_frame)
+        
+        # Category Distribution
+        category_frame = QFrame()
+        category_layout = QVBoxLayout(category_frame)
+        
+        category_header = QLabel("Category Distribution")
+        category_header.setStyleSheet(f"""
+            QLabel {{
+                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
+                font-size: 18px;
+                font-weight: bold;
+                margin-bottom: 10px;
+            }}
+        """)
+        category_layout.addWidget(category_header)
+        
+        # Category grid
+        self.category_grid = QGridLayout()
+        category_layout.addLayout(self.category_grid)
+        
+        layout.addWidget(category_frame)
+        
+        # Recent Activity
+        activity_frame = QFrame()
+        activity_layout = QVBoxLayout(activity_frame)
+        
+        activity_header = QLabel("Recent Activity")
+        activity_header.setStyleSheet(f"""
+            QLabel {{
+                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
+                font-size: 18px;
+                font-weight: bold;
+                margin-bottom: 10px;
+            }}
+        """)
+        activity_layout.addWidget(activity_header)
+        
+        self.activity_list = QTextEdit()
+        self.activity_list.setReadOnly(True)
+        self.activity_list.setStyleSheet(f"""
+            QTextEdit {{
+                background: {DARK_MODE['secondary'] if self.is_dark_mode else '#f8f9fa'};
+                color: {DARK_MODE['text'] if self.is_dark_mode else '#2c3e50'};
+                border: 1px solid {DARK_MODE['border'] if self.is_dark_mode else '#e9ecef'};
+                border-radius: 5px;
+                padding: 10px;
+            }}
+        """)
+        activity_layout.addWidget(self.activity_list)
+        
+        layout.addWidget(activity_frame)
+        
+        self.tabs.addTab(dashboard_tab, "Dashboard")
 
     def start_data_collection(self):
         def collect_data():
@@ -1373,35 +1392,7 @@ class MeAIApp(QMainWindow):
         thread = threading.Thread(target=collect_data, daemon=True)
         thread.start()
 
-    def update_ui(self):
-        try:
-            while not self.data_queue.empty():
-                data = self.data_queue.get_nowait()
-                
-                # Update training data
-                self.training_data = data.get('training_data', {})
-                self.category_data = data.get('categories', {})
-                self.recent_activities = data.get('recent_activities', [])
-                
-                # Update stats
-                total_data = sum(self.training_data.values())
-                active_categories = len(self.category_data)
-                training_speed = data.get('training_speed', 0)
-                
-                self.total_data_card.findChild(QLabel, "", Qt.FindChildOption.FindChildrenRecursively)[1].setText(str(total_data))
-                self.active_categories_card.findChild(QLabel, "", Qt.FindChildOption.FindChildrenRecursively)[1].setText(str(active_categories))
-                self.training_speed_card.findChild(QLabel, "", Qt.FindChildOption.FindChildrenRecursively)[1].setText(f"{training_speed}/s")
-                
-                # Update category grid
-                self.update_category_grid()
-                
-                # Update activity list
-                self.update_activity_list()
-                
-        except queue.Empty:
-            pass
-
-    def update_category_grid(self):
+    def update_category_distribution(self, category_data):
         # Clear existing widgets
         while self.category_grid.count():
             item = self.category_grid.takeAt(0)
@@ -1410,17 +1401,17 @@ class MeAIApp(QMainWindow):
         
         # Add new category cards
         row, col = 0, 0
-        for category, count in self.category_data.items():
-            card = CategoryCard(category, count)
+        for category, count in category_data.items():
+            card = CategoryCard(category, count, is_dark=self.is_dark_mode)
             self.category_grid.addWidget(card, row, col)
             col += 1
             if col > 2:  # 3 cards per row
                 col = 0
                 row += 1
 
-    def update_activity_list(self):
+    def update_recent_activity(self, recent_activities):
         self.activity_list.clear()
-        for activity in self.recent_activities:
+        for activity in recent_activities:
             self.activity_list.append(f"• {activity}")
 
     def closeEvent(self, event):
@@ -1428,6 +1419,71 @@ class MeAIApp(QMainWindow):
         # Clean up resources
         self.update_timer.stop()
         event.accept()
+
+    def update_theme(self):
+        """Update the application theme."""
+        if self.is_dark_mode:
+            self.setStyleSheet(f"""
+                QMainWindow {{
+                    background: {DARK_MODE['background']};
+                }}
+                QWidget {{
+                    background: {DARK_MODE['background']};
+                    color: {DARK_MODE['text']};
+                }}
+                QTabWidget::pane {{
+                    border: 1px solid {DARK_MODE['border']};
+                    border-radius: 5px;
+                    background: {DARK_MODE['secondary']};
+                }}
+                QTabBar::tab {{
+                    background: {DARK_MODE['background']};
+                    border: 1px solid {DARK_MODE['border']};
+                    padding: 8px 16px;
+                    margin-right: 2px;
+                    color: {DARK_MODE['text']};
+                }}
+                QTabBar::tab:selected {{
+                    background: {DARK_MODE['secondary']};
+                    border-bottom: 2px solid {DARK_MODE['accent']};
+                }}
+                QTextEdit {{
+                    background: {DARK_MODE['secondary']};
+                    color: {DARK_MODE['text']};
+                    border: 1px solid {DARK_MODE['border']};
+                }}
+                QLineEdit {{
+                    background: {DARK_MODE['secondary']};
+                    color: {DARK_MODE['text']};
+                    border: 1px solid {DARK_MODE['border']};
+                    padding: 5px;
+                }}
+            """)
+        else:
+            self.setStyleSheet("""
+                QMainWindow {
+                    background: #f8f9fa;
+                }
+                QWidget {
+                    background: #f8f9fa;
+                    color: #2c3e50;
+                }
+                QTabWidget::pane {
+                    border: 1px solid #e9ecef;
+                    border-radius: 5px;
+                    background: white;
+                }
+                QTabBar::tab {
+                    background: #f8f9fa;
+                    border: 1px solid #e9ecef;
+                    padding: 8px 16px;
+                    margin-right: 2px;
+                }
+                QTabBar::tab:selected {
+                    background: white;
+                    border-bottom: 2px solid #4a90e2;
+                }
+            """)
 
 def main():
     app = QApplication(sys.argv)
