@@ -22,3 +22,7 @@ sqlmap
 matplotlib
 plotly
 pyqtgraph
+pywin32>=305; platform_system == "Windows"
+psutil>=5.9.0
+wmi>=1.5.1; platform_system == "Windows"
+watchfiles>=0.21.0

@@ -1,15 +1,25 @@
 import sys
 import requests
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QTabWidget, QFileDialog, QMessageBox, QProgressBar, QFrame, QCheckBox, QInputDialog, QListWidget, QListWidgetItem, QSplitter, QComboBox
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QTabWidget, QFileDialog, QMessageBox, QProgressBar, QFrame, QCheckBox, QInputDialog, QListWidget, QListWidgetItem, QSplitter, QComboBox, QScrollArea, QGridLayout
 )
-from PyQt6.QtGui import QFont, QColor, QTextCharFormat, QTextCursor
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QFont, QColor, QTextCharFormat, QTextCursor, QPalette, QLinearGradient, QGradient, QIcon
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPropertyAnimation, QEasingCurve, QSize, QFileSystemWatcher
 import markdown2
 import json
 import subprocess
 import os
 import platform
+import time
+from datetime import datetime
+from collections import defaultdict
+import threading
+import queue
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import numpy as np
+import importlib
+import logging
 
 APP_NAME = "MeAI"
 BRAND = "MeAI by Mesum Bin Shaukat\nOwner of World Of Tech"
@@ -37,6 +47,37 @@ try:
     STT_AVAILABLE = True
 except ImportError:
     STT_AVAILABLE = False
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class HotReloader:
+    def __init__(self, app):
+        self.app = app
+        self.watcher = QFileSystemWatcher()
+        self.watcher.addPath(os.path.abspath(__file__))
+        self.watcher.fileChanged.connect(self.reload_ui)
+        self.last_modified = os.path.getmtime(__file__)
+        
+    def reload_ui(self, path):
+        """Reload the UI when the file changes."""
+        try:
+            current_modified = os.path.getmtime(path)
+            if current_modified > self.last_modified:
+                logger.info("Detected UI changes, reloading...")
+                self.last_modified = current_modified
+                
+                # Reload the module
+                importlib.reload(sys.modules[__name__])
+                
+                # Recreate the main window
+                self.app.closeAllWindows()
+                new_window = MeAIApp()
+                new_window.show()
+                
+        except Exception as e:
+            logger.error(f"Error reloading UI: {e}")
 
 class ChatWorker(QThread):
     response_signal = pyqtSignal(str)
@@ -100,72 +141,250 @@ class StreamingChatWorker(QThread):
         except Exception as e:
             self.error_signal.emit(str(e))
 
+class ModernButton(QPushButton):
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #4a90e2, stop:1 #67b26f);
+                border: none;
+                color: white;
+                padding: 10px 20px;
+                border-radius: 5px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #357abd, stop:1 #4a9e4f);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #2d6da3, stop:1 #3d7d42);
+            }
+        """)
+
+class AnimatedProgressBar(QProgressBar):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #4a90e2;
+                border-radius: 5px;
+                text-align: center;
+                background-color: #f0f0f0;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #4a90e2, stop:1 #67b26f);
+                border-radius: 3px;
+            }
+        """)
+        self.animation = QPropertyAnimation(self, b"value")
+        self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.animation.setDuration(1000)
+
+    def setValue(self, value):
+        self.animation.setStartValue(self.value())
+        self.animation.setEndValue(value)
+        self.animation.start()
+
+class CategoryCard(QFrame):
+    def __init__(self, title, count, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, 
+                    stop:0 #ffffff, stop:1 #f8f9fa);
+                border-radius: 10px;
+                border: 1px solid #e9ecef;
+            }
+        """)
+        layout = QVBoxLayout()
+        
+        title_label = QLabel(title)
+        title_label.setStyleSheet("""
+            QLabel {
+                color: #2c3e50;
+                font-size: 16px;
+                font-weight: bold;
+            }
+        """)
+        
+        count_label = QLabel(str(count))
+        count_label.setStyleSheet("""
+            QLabel {
+                color: #4a90e2;
+                font-size: 24px;
+                font-weight: bold;
+            }
+        """)
+        
+        layout.addWidget(title_label)
+        layout.addWidget(count_label)
+        self.setLayout(layout)
+
 class MeAIApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(APP_NAME)
-        self.setMinimumSize(1000, 750)
-        self.setStyleSheet(DARK_STYLE)
-        self.recent_topics = []  # Track recent topics/questions
+        self.setWindowTitle("MeAI Desktop")
+        self.setGeometry(100, 100, 1200, 800)
+        
+        # Initialize system information
+        self.system_info = None
+        self.update_system_info()
+        
+        # Initialize hot reloader
+        self.hot_reloader = HotReloader(QApplication.instance())
+        
+        # Create main widget and layout
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        layout = QVBoxLayout(main_widget)
+        
+        # Create tab widget
         self.tabs = QTabWidget()
-        # Add a sidebar for recent topics
-        self.splitter = QSplitter()
-        self.sidebar = QListWidget()
-        self.sidebar.setMaximumWidth(260)
-        self.sidebar.setStyleSheet("background:#23272a;color:#e8eaed;border-right:1px solid #444;")
-        self.sidebar.itemClicked.connect(self.sidebar_item_clicked)
-        self.splitter.addWidget(self.sidebar)
-        self.splitter.addWidget(self.tabs)
-        self.setCentralWidget(self.splitter)
-        self.cyber_mode = False
-        self.preferences = self.load_preferences()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #e9ecef;
+                border-radius: 5px;
+                background: white;
+            }
+            QTabBar::tab {
+                background: #f8f9fa;
+                border: 1px solid #e9ecef;
+                padding: 8px 16px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background: white;
+                border-bottom: 2px solid #4a90e2;
+            }
+        """)
+        layout.addWidget(self.tabs)
+        
+        # Initialize tabs
         self.init_chat_tab()
-        self.init_knowledge_tab()
-        self.init_web_tab()
-        self.init_code_tab()
-        self.init_task_tab()
-        self.init_plugins_tab()
-        self.init_admin_tab()
-        self.init_preferences_tab()
         self.init_dashboard_tab()
-        self.statusBar().showMessage(BRAND)
-        self.status_timer = QTimer()
-        self.status_timer.timeout.connect(self.poll_status)
-        self.status_timer.start(2000)
-        self.last_assistant_bubble_pos = None  # Track the last assistant bubble position
-    def poll_status(self):
+        
+        # Initialize chat history with system context
+        self.chat_history = [
+            {
+                "role": "system",
+                "content": f"""You are a helpful, knowledgeable AI assistant with direct access to the user's system.
+                You can execute system commands and access local resources.
+                Current system information:
+                Platform: {self.system_info.get('platform', 'Unknown')}
+                Version: {self.system_info.get('platform_version', 'Unknown')}
+                Architecture: {self.system_info.get('architecture', 'Unknown')}
+                Available drives: {', '.join([d['drive'] for d in self.system_info.get('drives', [])])}
+                
+                You can directly execute commands like:
+                - Opening applications (e.g., "open notepad", "open chrome")
+                - Running system commands (e.g., "open command prompt", "open powershell")
+                - Accessing files and directories
+                
+                Always execute commands directly when requested, don't just provide instructions.
+                """
+            }
+        ]
+
+        # Initialize data structures
+        self.training_data = defaultdict(int)
+        self.category_data = defaultdict(int)
+        self.recent_activities = []
+        self.data_queue = queue.Queue()
+        
+        # Start data collection thread
+        self.start_data_collection()
+        
+        # Set up timer for UI updates
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_ui)
+        self.update_timer.start(1000)  # Update every second
+
+    def update_system_info(self):
+        """Update system information from the server."""
         try:
-            resp = requests.get(f"{SERVER_URL}/status", timeout=2)
-            status = resp.json()
-            mem_resp = requests.get(f"{SERVER_URL}/memory/usage", timeout=2)
-            mem = mem_resp.json()
-            health_resp = requests.get(f"{SERVER_URL}/health", timeout=2)
-            health = health_resp.json()
-            msg = f"RAM: {mem['ram']}% | CPU: {mem['cpu']}% | Processing: {'Yes' if status['processing'] else 'No'}"
-            if status.get('last_error'):
-                msg += f" | Last Error: {status['last_error']}"
-            if health.get('status') != 'ok':
-                msg += f" | [Health: ERROR]"
-            self.statusBar().showMessage(f"{BRAND} | {msg}")
-            if health.get('status') != 'ok':
-                self.show_health_error(health)
-        except Exception:
-            self.statusBar().showMessage(f"{BRAND} | [Server Offline]")
-    def show_health_error(self, health):
-        msg = QMessageBox(self)
-        msg.setWindowTitle("System Health Error")
-        msg.setText("Critical system health check failed!")
-        msg.setDetailedText(json.dumps(health, indent=2))
-        msg.setIcon(QMessageBox.Icon.Critical)
-        restart_btn = msg.addButton("Restart Server", QMessageBox.ButtonRole.ActionRole)
-        msg.addButton(QMessageBox.StandardButton.Close)
-        msg.exec()
-        if msg.clickedButton() == restart_btn:
-            self.restart_server_backend()
-    def show_progress(self, message):
-        self.statusBar().showMessage(message)
-    def hide_progress(self):
-        self.statusBar().showMessage(BRAND)
+            response = requests.post("http://localhost:8000/system/info")
+            if response.status_code == 200:
+                self.system_info = response.json()
+        except Exception as e:
+            print(f"Error updating system info: {e}")
+            self.system_info = {}
+
+    def is_task_request(self, user_input):
+        """
+        Enhanced detection of system-level task requests.
+        """
+        nl = user_input.strip().lower()
+        
+        # Check for application launch requests
+        if any(pattern in nl for pattern in [
+            "open ", "run ", "start ", "launch ",
+            "open notepad", "open calculator", "open calc",
+            "open explorer", "open file explorer",
+            "open word", "open excel", "open powerpoint",
+            "open chrome", "open firefox", "open edge",
+            "open command prompt", "open cmd",
+            "open powershell", "open terminal"
+        ]):
+            return True
+            
+        # Check for system commands
+        if any(pattern in nl for pattern in [
+            "list files", "show files", "list directories",
+            "show directories", "list drives", "show drives",
+            "system info", "show system info"
+        ]):
+            return True
+            
+        return False
+
+    def handle_user_input(self):
+        """Handle user input with enhanced system command support."""
+        user_input = self.input_field.text().strip()
+        if not user_input:
+            return
+            
+        self.input_field.clear()
+        self.add_message("You", user_input)
+        
+        # Check if it's a system command
+        if self.is_task_request(user_input):
+            try:
+                response = requests.post(
+                    "http://localhost:8000/task/execute",
+                    json={"instruction": user_input}
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    self.add_message("MeAI", f"Executed command: {result['command']}")
+                else:
+                    error = response.json().get("error", "Unknown error")
+                    self.add_message("MeAI", f"Error executing command: {error}")
+            except Exception as e:
+                self.add_message("MeAI", f"Error: {str(e)}")
+            return
+            
+        # Handle regular chat
+        self.chat_history.append({"role": "user", "content": user_input})
+        
+        try:
+            response = requests.post(
+                "http://localhost:8000/chat",
+                json={"messages": self.chat_history}
+            )
+            if response.status_code == 200:
+                result = response.json()
+                ai_response = result.get("response", "Sorry, I couldn't process that.")
+                self.add_message("MeAI", ai_response)
+                self.chat_history.append({"role": "assistant", "content": ai_response})
+            else:
+                self.add_message("MeAI", "Error: Could not get response from server.")
+        except Exception as e:
+            self.add_message("MeAI", f"Error: {str(e)}")
+
     def init_chat_tab(self):
         tab = QWidget()
         layout = QVBoxLayout()
@@ -1139,10 +1358,88 @@ class MeAIApp(QMainWindow):
         except Exception as e:
             self.pentest_output.setText(f"Error: {e}")
 
+    def start_data_collection(self):
+        def collect_data():
+            while True:
+                try:
+                    response = requests.get('http://localhost:8000/training/status')
+                    if response.status_code == 200:
+                        data = response.json()
+                        self.data_queue.put(data)
+                except:
+                    pass
+                time.sleep(1)
+        
+        thread = threading.Thread(target=collect_data, daemon=True)
+        thread.start()
+
+    def update_ui(self):
+        try:
+            while not self.data_queue.empty():
+                data = self.data_queue.get_nowait()
+                
+                # Update training data
+                self.training_data = data.get('training_data', {})
+                self.category_data = data.get('categories', {})
+                self.recent_activities = data.get('recent_activities', [])
+                
+                # Update stats
+                total_data = sum(self.training_data.values())
+                active_categories = len(self.category_data)
+                training_speed = data.get('training_speed', 0)
+                
+                self.total_data_card.findChild(QLabel, "", Qt.FindChildOption.FindChildrenRecursively)[1].setText(str(total_data))
+                self.active_categories_card.findChild(QLabel, "", Qt.FindChildOption.FindChildrenRecursively)[1].setText(str(active_categories))
+                self.training_speed_card.findChild(QLabel, "", Qt.FindChildOption.FindChildrenRecursively)[1].setText(f"{training_speed}/s")
+                
+                # Update category grid
+                self.update_category_grid()
+                
+                # Update activity list
+                self.update_activity_list()
+                
+        except queue.Empty:
+            pass
+
+    def update_category_grid(self):
+        # Clear existing widgets
+        while self.category_grid.count():
+            item = self.category_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        # Add new category cards
+        row, col = 0, 0
+        for category, count in self.category_data.items():
+            card = CategoryCard(category, count)
+            self.category_grid.addWidget(card, row, col)
+            col += 1
+            if col > 2:  # 3 cards per row
+                col = 0
+                row += 1
+
+    def update_activity_list(self):
+        self.activity_list.clear()
+        for activity in self.recent_activities:
+            self.activity_list.append(f"• {activity}")
+
+    def closeEvent(self, event):
+        """Handle window close event."""
+        # Clean up resources
+        self.update_timer.stop()
+        event.accept()
+
 def main():
     app = QApplication(sys.argv)
+    
+    # Set application style
+    app.setStyle("Fusion")
+    
+    # Create and show the main window
     window = MeAIApp()
     window.show()
+    
+    # Start the application
     sys.exit(app.exec())
 
 if __name__ == "__main__":

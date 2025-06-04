@@ -22,6 +22,14 @@ import json
 import platform
 from bs4 import BeautifulSoup
 import nmap
+from collections import defaultdict
+from datetime import datetime
+import queue
+import uvicorn
+from fastapi.middleware.cors import CORSMiddleware
+import watchfiles
+from watchfiles import run_process
+import importlib
 
 MODEL_PATH = "./models/mistral-7b-instruct/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
 CHROMA_DB_FOLDER = "./chroma_db"
@@ -31,7 +39,7 @@ CACHE_FILE = "./llm_cache.pkl"
 AUTOMATION_LOG = "automation_actions.log"
 ACTION_LOG = "user_actions.log"
 
-app = FastAPI()
+app = FastAPI(title="MeAI Server")
 llm = None
 
 # Ensure plugins directory exists
@@ -719,52 +727,128 @@ async def batch_knowledge(request: dict):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+def get_system_info():
+    """Gather information about the local system."""
+    info = {
+        "platform": platform.system(),
+        "platform_version": platform.version(),
+        "architecture": platform.machine(),
+        "processor": platform.processor(),
+        "python_version": platform.python_version(),
+        "drives": [],
+        "installed_programs": []
+    }
+    
+    # Get drive information
+    if platform.system() == "Windows":
+        import win32api
+        drives = win32api.GetLogicalDriveStrings()
+        drives = drives.split('\000')[:-1]
+        for drive in drives:
+            try:
+                free_bytes = win32api.GetDiskFreeSpace(drive)
+                total_bytes = free_bytes[0] * free_bytes[1] * free_bytes[2]
+                free_space = free_bytes[0] * free_bytes[1] * free_bytes[3]
+                info["drives"].append({
+                    "drive": drive,
+                    "total_space": total_bytes,
+                    "free_space": free_space
+                })
+            except:
+                continue
+    
+    return info
+
 def map_natural_language_to_command(nl_request: str):
     """
     Map a natural language request to a system command string.
-    This is a simple intent-to-command mapping. Expand as needed.
+    Enhanced to handle more system commands and applications.
     """
     nl = nl_request.strip().lower()
+    
+    # Common Windows applications
+    if "open notepad" in nl:
+        return "start notepad.exe"
+    if "open calculator" in nl or "open calc" in nl:
+        return "start calc.exe"
+    if "open explorer" in nl or "open file explorer" in nl:
+        return "start explorer.exe"
+    if "open word" in nl:
+        return "start winword.exe"
+    if "open excel" in nl:
+        return "start excel.exe"
+    if "open powerpoint" in nl:
+        return "start powerpnt.exe"
+    if "open chrome" in nl:
+        return "start chrome.exe"
+    if "open firefox" in nl:
+        return "start firefox.exe"
+    if "open edge" in nl:
+        return "start msedge.exe"
+    
+    # System commands
     if "open command prompt" in nl or "open cmd" in nl or "start command prompt" in nl:
+        return "start cmd.exe"
+    if "open powershell" in nl:
+        return "start powershell.exe"
+    if "open terminal" in nl:
         if platform.system() == "Windows":
-            return "start cmd.exe"
+            return "start powershell.exe"
         elif platform.system() == "Linux":
             return "x-terminal-emulator || gnome-terminal || konsole || xterm"
         elif platform.system() == "Darwin":
             return "open -a Terminal"
-    if "open powershell" in nl:
+    
+    # Generic application launcher
+    if nl.startswith("open ") or nl.startswith("run "):
+        app = nl.split(" ", 1)[1]
         if platform.system() == "Windows":
-            return "start powershell.exe"
-    if "open terminal" in nl:
-        if platform.system() == "Linux":
-            return "x-terminal-emulator || gnome-terminal || konsole || xterm"
+            return f"start {app}.exe"
+        elif platform.system() == "Linux":
+            return app
         elif platform.system() == "Darwin":
-            return "open -a Terminal"
-        elif platform.system() == "Windows":
-            return "start powershell.exe"
-    if nl.startswith("run ") or nl.startswith("execute "):
-        # e.g. "run notepad", "run calc", "run explorer"
-        cmd = nl.split(" ", 1)[1]
-        return cmd
+            return f"open -a {app}"
+    
     # Fallback: treat as direct shell command
     return nl_request
+
+@app.post("/system/info")
+async def get_system_information():
+    """Get detailed information about the local system."""
+    try:
+        info = get_system_info()
+        return info
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
 @app.post("/task/execute")
 async def execute_task(request: dict):
     """
-    Execute a system-level task from a natural language instruction, with no confirmation.
-    Fields: instruction (str)
-    Returns: result or error
+    Execute a system-level task from a natural language instruction.
+    Enhanced to handle more system commands and provide better feedback.
     """
     instruction = request.get("instruction", "")
     if not instruction:
         return JSONResponse(status_code=400, content={"error": "No instruction provided."})
+    
     cmd = map_natural_language_to_command(instruction)
     try:
-        result = subprocess.Popen(cmd, shell=True)
-        return {"status": "executed", "command": cmd}
+        # Use Popen to start the process without waiting
+        process = subprocess.Popen(cmd, shell=True)
+        return {
+            "status": "executed",
+            "command": cmd,
+            "pid": process.pid
+        }
     except Exception as e:
-        return JSONResponse(status_code=400, content={"error": str(e), "command": cmd})
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": str(e),
+                "command": cmd,
+                "traceback": traceback.format_exc()
+            }
+        )
 
 analytics_stats = {
     "docs": 0,
@@ -850,4 +934,120 @@ async def automation_chain(
 ):
     analytics_stats["tasks"] += 1
     # ... existing logic ...
-    # (rest of function unchanged) 
+    # (rest of function unchanged)
+
+# Global variables for training data
+training_data = defaultdict(int)
+category_data = defaultdict(int)
+recent_activities = []
+training_speed = 0
+last_update_time = time.time()
+last_data_count = 0
+
+def categorize_data(text):
+    """Categorize text data into predefined categories."""
+    categories = {
+        'code': ['python', 'javascript', 'java', 'c++', 'function', 'class', 'import', 'def', 'var', 'const'],
+        'documentation': ['readme', 'doc', 'guide', 'tutorial', 'manual', 'api', 'reference'],
+        'conversation': ['hello', 'hi', 'how are you', 'thanks', 'thank you', 'bye'],
+        'technical': ['error', 'bug', 'fix', 'issue', 'problem', 'solution', 'debug'],
+        'general': []  # Default category
+    }
+    
+    text_lower = text.lower()
+    for category, keywords in categories.items():
+        if any(keyword in text_lower for keyword in keywords):
+            return category
+    return 'general'
+
+def update_training_metrics():
+    """Update training metrics in the background."""
+    global training_speed, last_update_time, last_data_count
+    
+    while True:
+        current_time = time.time()
+        current_count = sum(training_data.values())
+        
+        # Calculate training speed
+        time_diff = current_time - last_update_time
+        if time_diff > 0:
+            training_speed = (current_count - last_data_count) / time_diff
+        
+        last_update_time = current_time
+        last_data_count = current_count
+        
+        # Keep only last 100 activities
+        if len(recent_activities) > 100:
+            recent_activities.pop(0)
+        
+        time.sleep(1)
+
+# Start the metrics update thread
+metrics_thread = threading.Thread(target=update_training_metrics, daemon=True)
+metrics_thread.start()
+
+@app.get("/training/status")
+async def get_training_status():
+    """Get current training status and metrics."""
+    return {
+        "training_data": dict(training_data),
+        "categories": dict(category_data),
+        "recent_activities": recent_activities,
+        "training_speed": round(training_speed, 2)
+    }
+
+@app.post("/train")
+async def train_data(data: dict):
+    """Train on new data and update metrics."""
+    text = data.get("text", "")
+    if not text:
+        return {"error": "No text provided"}
+    
+    # Categorize the data
+    category = categorize_data(text)
+    category_data[category] += 1
+    training_data[datetime.now().strftime("%Y-%m-%d")] += 1
+    
+    # Add to recent activities
+    activity = f"Trained on {category} data: {text[:50]}..."
+    recent_activities.append(activity)
+    
+    return {"status": "success", "category": category}
+
+def reload_modules():
+    """Reload all modules to apply code changes."""
+    try:
+        # Get all loaded modules
+        modules = list(sys.modules.values())
+        
+        # Reload each module
+        for module in modules:
+            if module.__name__.startswith('llm_server'):
+                importlib.reload(module)
+                logger.info(f"Reloaded module: {module.__name__}")
+    except Exception as e:
+        logger.error(f"Error reloading modules: {e}")
+
+def watch_for_changes():
+    """Watch for file changes and trigger reload."""
+    def callback(changes):
+        logger.info(f"Detected changes: {changes}")
+        reload_modules()
+    
+    # Watch the current directory for changes
+    watchfiles.watch_dir('.', callback=callback, recursive=True)
+
+# Start the file watcher in a separate thread
+watcher_thread = threading.Thread(target=watch_for_changes, daemon=True)
+watcher_thread.start()
+
+if __name__ == "__main__":
+    # Run with hot reload enabled
+    uvicorn.run(
+        "llm_server:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        reload_dirs=["."],
+        log_level="info"
+    ) 
