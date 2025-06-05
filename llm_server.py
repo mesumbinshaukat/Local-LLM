@@ -30,6 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import watchfiles
 from watchfiles import run_process
 import importlib
+from pymongo.errors import ServerSelectionTimeoutError
 
 MODEL_PATH = "./models/mistral-7b-instruct/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
 CHROMA_DB_FOLDER = "./chroma_db"
@@ -40,6 +41,16 @@ AUTOMATION_LOG = "automation_actions.log"
 ACTION_LOG = "user_actions.log"
 
 app = FastAPI(title="MeAI Server")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
+
 llm = None
 
 # Ensure plugins directory exists
@@ -148,10 +159,17 @@ async def chat_endpoint(req: ChatRequest):
                 messages[0]["content"] = sys_prompt
             for m in messages:
                 if m["role"] == "user" and "my name is" in m["content"].lower():
-                    name = m["content"].split("my name is",1)[1].strip().split()[0].capitalize()
-                    db = get_mongo()
-                    db.user_info.update_one({"key": "name"}, {"$set": {"value": name}}, upsert=True)
+                    try:
+                        name = m["content"].split("my name is",1)[1].strip().split()[0].capitalize()
+                        db = get_mongo()
+                        if db is None:
+                            return JSONResponse(status_code=500, content={"error": "MongoDB unavailable"})
+                        db.user_info.update_one({"key": "name"}, {"$set": {"value": name}}, upsert=True)
+                    except Exception as e:
+                        logging.error(f"Failed to extract or store user name: {e}")
             db = get_mongo()
+            if db is None:
+                return JSONResponse(status_code=500, content={"error": "MongoDB unavailable"})
             for m in messages:
                 if isinstance(m, dict) and 'role' in m and 'content' in m:
                     db.chat_history.insert_one({"user_id": user_id, "message": m, "timestamp": time.time()})
@@ -229,9 +247,19 @@ async def chat_stream_endpoint(req: ChatRequest):
                 messages[0]["content"] = sys_prompt
             for m in messages:
                 if m["role"] == "user" and "my name is" in m["content"].lower():
-                    name = m["content"].split("my name is",1)[1].strip().split()[0].capitalize()
-                    db = get_mongo()
-                    db.user_info.update_one({"key": "name"}, {"$set": {"value": name}}, upsert=True)
+                    try:
+                        name = m["content"].split("my name is",1)[1].strip().split()[0].capitalize()
+                        db = get_mongo()
+                        if db is None:
+                            yield f"\n[ERROR]: MongoDB unavailable\n"
+                            return
+                        db.user_info.update_one({"key": "name"}, {"$set": {"value": name}}, upsert=True)
+                    except Exception as e:
+                        logging.error(f"Failed to extract or store user name: {e}")
+                db = get_mongo()
+                if db is None:
+                    yield f"\n[ERROR]: MongoDB unavailable\n"
+                    return
                 if isinstance(m, dict) and 'role' in m and 'content' in m:
                     db.chat_history.insert_one({"user_id": user_id, "message": m, "timestamp": time.time()})
                 else:
@@ -294,7 +322,15 @@ def retrieve_context(query, top_k=3):
 
 # MongoDB client for persistent memory
 def get_mongo():
-    return MongoClient(MONGO_URI)[DB_NAME]
+    try:
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=2000)
+        # Force connection on a request as the connect=True parameter of MongoClient seems
+        # to be useless here
+        client.server_info()
+        return client[DB_NAME]
+    except ServerSelectionTimeoutError as e:
+        logging.error(f"MongoDB connection failed: {e}")
+        return None
 
 # Cache management
 def save_cache(data):
@@ -332,6 +368,8 @@ async def save_memory(request: dict):
     key = request.get("key")
     value = request.get("value")
     db = get_mongo()
+    if db is None:
+        return JSONResponse(status_code=500, content={"error": "MongoDB unavailable"})
     db.memory.update_one({"key": key}, {"$set": {"value": value}}, upsert=True)
     return {"status": "ok"}
 
@@ -1021,18 +1059,24 @@ async def save_user_info(request: dict):
     key = request.get("key")
     value = request.get("value")
     db = get_mongo()
+    if db is None:
+        return JSONResponse(status_code=500, content={"error": "MongoDB unavailable"})
     db.user_info.update_one({"key": key}, {"$set": {"value": value}}, upsert=True)
     return {"status": "ok"}
 
 @app.get("/memory/user_info/{key}")
 async def load_user_info(key: str):
     db = get_mongo()
+    if db is None:
+        return JSONResponse(status_code=500, content={"error": "MongoDB unavailable"})
     doc = db.user_info.find_one({"key": key})
     return {"value": doc["value"] if doc else None}
 
 # --- Helper to get user info for personalization ---
 def get_user_name():
     db = get_mongo()
+    if db is None:
+        return None
     doc = db.user_info.find_one({"key": "name"})
     return doc["value"] if doc else None
 
@@ -1070,12 +1114,16 @@ async def save_chat_history(request: dict):
     user_id = request.get("user_id", "default")
     message = request.get("message")
     db = get_mongo()
+    if db is None:
+        return JSONResponse(status_code=500, content={"error": "MongoDB unavailable"})
     db.chat_history.insert_one({"user_id": user_id, "message": message, "timestamp": time.time()})
     return {"status": "ok"}
 
 @app.get("/memory/chat_history/{user_id}")
 async def load_chat_history(user_id: str, limit: int = 10):
     db = get_mongo()
+    if db is None:
+        return JSONResponse(status_code=500, content={"error": "MongoDB unavailable"})
     cursor = db.chat_history.find({"user_id": user_id}).sort("timestamp", -1).limit(limit)
     history = [doc["message"] for doc in cursor][::-1]
     # Always return as list of dicts with 'role' and 'content'
@@ -1090,6 +1138,8 @@ async def load_chat_history(user_id: str, limit: int = 10):
 # --- Helper to get recent chat history for prompt ---
 def get_recent_chat_history(user_id="default", limit=5):
     db = get_mongo()
+    if db is None:
+        return ""
     cursor = db.chat_history.find({"user_id": user_id}).sort("timestamp", -1).limit(limit)
     history = [doc["message"] for doc in cursor][::-1]
     # Summarize as a string for prompt
