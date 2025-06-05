@@ -81,9 +81,7 @@ class StreamingChatWorker(QThread):
             # Ensure history is a list of message objects
             messages = []
             if isinstance(self.history, list):
-                messages = self.history.copy()
-            else:
-                messages = []
+                messages = [msg for msg in self.history if isinstance(msg, dict) and 'role' in msg and 'content' in msg]
             
             # Add the current user input
             messages.append({"role": "user", "content": self.user_input})

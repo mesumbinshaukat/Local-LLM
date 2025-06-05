@@ -63,6 +63,7 @@ from components.tabs.automation_tab import AutomationTab
 from components.tabs.plugins_tab import PluginsTab
 from components.tabs.preferences_tab import PreferencesTab
 from components.tabs.dashboard_tab import DashboardTab
+from components.tabs.training_tab import TrainingTab
 
 class HotReloader:
     def __init__(self, app):
@@ -94,7 +95,7 @@ class HotReloader:
 class MeAIApp(QMainWindow):
     # Add a signal for log updates
     log_update_signal = pyqtSignal(str)
-    
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
@@ -113,15 +114,15 @@ class MeAIApp(QMainWindow):
         # Create tab widget
         self.tab_widget = QTabWidget()
         self.tab_widget.setStyleSheet(f"""
-            QTabWidget::pane {{
-                border: 1px solid {DARK_MODE['border']};
-                background: {DARK_MODE['background']};
+                QTabWidget::pane {{
+                    border: 1px solid {DARK_MODE['border']};
+                    background: {DARK_MODE['background']};
             }}
             QTabBar::tab {{
-                background: {DARK_MODE['secondary']};
-                color: {DARK_MODE['text']};
+                    background: {DARK_MODE['secondary']};
+                    color: {DARK_MODE['text']};
                 padding: 8px 16px;
-                border: 1px solid {DARK_MODE['border']};
+                    border: 1px solid {DARK_MODE['border']};
                 border-bottom: none;
                 border-top-left-radius: 4px;
                 border-top-right-radius: 4px;
@@ -129,8 +130,8 @@ class MeAIApp(QMainWindow):
             QTabBar::tab:selected {{
                 background: {DARK_MODE['accent']};
                 color: {DARK_MODE['foreground']};
-            }}
-        """)
+                }}
+            """)
         
         # Add tabs
         self.dashboard_tab = DashboardTab()
@@ -142,6 +143,7 @@ class MeAIApp(QMainWindow):
         self.plugins_tab = PluginsTab()
         self.preferences_tab = PreferencesTab()
         self.admin_tab = AdminTab()
+        self.training_tab = TrainingTab()
         
         self.tab_widget.addTab(self.dashboard_tab, "Dashboard")
         self.tab_widget.addTab(self.chat_tab, "Chat")
@@ -152,9 +154,10 @@ class MeAIApp(QMainWindow):
         self.tab_widget.addTab(self.plugins_tab, "Plugins")
         self.tab_widget.addTab(self.preferences_tab, "Preferences")
         self.tab_widget.addTab(self.admin_tab, "Admin")
+        self.tab_widget.addTab(self.training_tab, "Training")
         
         layout.addWidget(self.tab_widget)
-        
+
     def set_dark_mode(self, enabled):
         if enabled:
             self.setStyleSheet(f"""
@@ -209,7 +212,7 @@ def get_user_name():
         return os.getlogin()
     except:
         return "User"
-        
+
 def main():
     app = QApplication(sys.argv)
     window = MeAIApp()

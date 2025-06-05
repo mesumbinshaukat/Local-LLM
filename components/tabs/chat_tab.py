@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, 
-                            QPushButton, QLabel, QScrollArea, QFrame, QSizePolicy)
-from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QVariant, QTimer
+                            QPushButton, QLabel, QScrollArea, QFrame, QSizePolicy, QProgressBar)
+from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QVariant, QTimer, QObject
 from PyQt6.QtGui import QFont, QTextCursor, QTextDocument
 from components.ui.base_components import ModernButton
 from components.utils.workers import ChatWorker, StreamingChatWorker
@@ -11,6 +11,25 @@ import logging
 import requests
 
 logger = logging.getLogger(__name__)
+
+class BouncingDotsLoader(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.label = QLabel("Thinking", self)
+        self.label.setStyleSheet("color: #aaa; font-style: italic; font-size: 16px;")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.addWidget(self.label)
+        self.dots = 0
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.animate)
+        self.timer.start(400)
+        self.setStyleSheet("background: transparent; border: none;")
+    def animate(self):
+        self.dots = (self.dots + 1) % 4
+        self.label.setText("Thinking" + "." * self.dots)
+    def stop(self):
+        self.timer.stop()
 
 class ChatTab(QWidget):
     message_sent = pyqtSignal(str)
@@ -85,10 +104,28 @@ class ChatTab(QWidget):
         self.input_field.clear()
         self.add_chat_bubble(message, user=True)
         self.message_sent.emit(message)
-        # Show thinking status and preview
+        # Show animated bouncing dots loader as a bubble
+        self.loader_bubble = BouncingDotsLoader()
+        self.chat_layout.addWidget(self.loader_bubble)
+        # Calculate and display estimated_time immediately
+        estimated_time = max(2, min(10, len(message.split()) / 8))
+        progress = QProgressBar()
+        progress.setMaximum(100)
+        progress.setValue(0)
+        progress.setTextVisible(True)
+        progress.setFormat("Estimated: %.1fs" % estimated_time)
+        self.chat_layout.addWidget(progress)
+        # Animate the progress bar
+        def update_progress(val=0):
+            if val <= 100:
+                progress.setValue(val)
+                QTimer.singleShot(int(estimated_time * 10), lambda: update_progress(val+10))
+            else:
+                progress.setValue(100)
+        update_progress(0)
+        QTimer.singleShot(100, lambda: self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum()))
         self.status_label.setText("Thinking...")
         self.status_changed.emit("Thinking...")
-        self.add_chat_bubble("...", user=False, label="Preview")
         # Start streaming worker
         self.current_worker = StreamingChatWorker(self.chat_history, message)
         self.current_worker.partial_signal.connect(self.display_partial_response)
@@ -97,7 +134,7 @@ class ChatTab(QWidget):
         self.current_worker.start()
         print("[ChatTab] Started StreamingChatWorker.")
         
-    def add_chat_bubble(self, text, user=True, label=None, suggestions=None):
+    def add_chat_bubble(self, text, user=True, label=None, suggestions=None, from_cache=False, estimated_time=None):
         # Do not add a bubble for empty or whitespace-only text
         if not text or not str(text).strip():
             print(f"[ChatTab] Skipping empty bubble: user={user} label={label}")
@@ -150,6 +187,29 @@ class ChatTab(QWidget):
             }
         """)
         bubble_layout.addWidget(message_label)
+        # Add cache/live indicator
+        if not user and from_cache is not None:
+            cache_label = QLabel("<i>From cache</i>" if from_cache else "<i>Generated live</i>")
+            cache_label.setStyleSheet("color: #7ec699; font-size: 11px; margin-top: 2px;")
+            bubble_layout.addWidget(cache_label)
+        # Add progress bar if not from cache (always show, use default if needed)
+        if not user and not from_cache:
+            if estimated_time is None:
+                estimated_time = 5.0
+            progress = QProgressBar()
+            progress.setMaximum(100)
+            progress.setValue(0)
+            progress.setTextVisible(True)
+            progress.setFormat("Estimated: %.1fs" % estimated_time)
+            bubble_layout.addWidget(progress)
+            # Animate the progress bar
+            def update_progress(val=0):
+                if val <= 100:
+                    progress.setValue(val)
+                    QTimer.singleShot(int(estimated_time * 10), lambda: update_progress(val+10))
+                else:
+                    progress.setValue(100)
+            update_progress(0)
         # Add suggestions if provided
         if suggestions:
             suggestions_layout = QHBoxLayout()
@@ -162,12 +222,22 @@ class ChatTab(QWidget):
         self.chat_layout.addWidget(bubble)
         # Scroll to bottom
         QTimer.singleShot(100, lambda: self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum()))
-        print(f"[ChatTab] Added chat bubble: {'user' if user else 'assistant'} | label: {label} | text: {text[:60]}")
-        logger.info(f"Added chat bubble: {'user' if user else 'assistant'} | label: {label} | text: {text[:60]}")
+        print(f"[ChatTab] Added chat bubble: {'user' if user else 'assistant'} | label: {label} | text: {text[:60]} | from_cache: {from_cache} | estimated_time: {estimated_time}")
+        logger.info(f"Added chat bubble: {'user' if user else 'assistant'} | label: {label} | text: {text[:60]} | from_cache: {from_cache} | estimated_time: {estimated_time}")
         
+    def remove_loader_bubble(self):
+        # Remove the loader bubble if it exists
+        if hasattr(self, 'loader_bubble') and self.loader_bubble:
+            self.loader_bubble.setParent(None)
+            self.loader_bubble.deleteLater()
+            self.loader_bubble = None
+            print("[ChatTab] Removed loader bubble.")
+
     def display_partial_response(self, partial):
         print(f"[ChatTab] Displaying partial response: {repr(partial)}")
         logger.info(f"Displaying partial response: {repr(partial)}")
+        # Remove loader bubble on first partial response
+        self.remove_loader_bubble()
         # Update the last assistant message with the partial response
         if self.chat_history and self.chat_history[-1]["role"] == "assistant":
             self.chat_history[-1]["content"] += partial
@@ -242,12 +312,12 @@ class ChatTab(QWidget):
                 for msg in history:
                     role = msg.get("role", "user")
                     content = msg.get("content", "")
-                    # Only display non-empty, non-whitespace content
-                    if content and str(content).strip() and role in ("user", "assistant"):
+                    # Skip system messages and empty content
+                    if role == "system" or not content or not str(content).strip():
+                        continue
+                    # Only display user and assistant messages
+                    if role in ("user", "assistant"):
                         self.add_chat_bubble(content, user=(role=="user"))
-                    else:
-                        print(f"[ChatTab] Skipping empty history message: role={role} content='{content}'")
-                        logger.info(f"Skipping empty history message: role={role} content='{content}'")
                 print(f"[ChatTab] Loaded {len(history)} messages from backend.")
                 logger.info(f"Loaded {len(history)} messages from backend.")
             else:
